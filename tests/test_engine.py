@@ -88,8 +88,13 @@ class FakePianoRoll:
     def press_run_last_script(self):
         pass
 
+    def close_script_dialogs(self):
+        return False
 
-class EngineTest(unittest.TestCase):
+
+class EngineFixture(unittest.TestCase):
+    """A fake rack running the real FL script, wired to a fresh engine."""
+
     def setUp(self):
         self.rack = FakeRack(["Kick", "Clap", "Closed hat", "Snare", "808", "FL Keys",
                               "Padilion"])
@@ -107,6 +112,8 @@ class EngineTest(unittest.TestCase):
     def lit(self, ch):
         return sorted(s for p, c, s in self.rack.grid if p == self.rack.pattern and c == ch)
 
+
+class EngineTest(EngineFixture):
     def test_status_maps_the_rack(self):
         st = self.engine.status()
         self.assertTrue(st["connected"])
@@ -168,6 +175,32 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(resolve_genre("Boom Bap"), resolve_genre("boombap"))
         self.assertIsNone(resolve_genre("auto"))
         self.assertEqual(resolve_key("Bb"), resolve_key("A#"))
+
+
+class WindowText(EngineFixture):
+    """The desktop window shows the engine's results; check what it says."""
+
+    def window(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "ps_window", os.path.join(ROOT, "pattern_seeker.pyw"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_status_text_names_the_parts_and_where_they_went(self):
+        text = self.window().beat_text(self.engine.new_beat("trap", key="A"))
+        first, second = text.split("\n")[:2]
+        self.assertIn("Trap", first)
+        self.assertIn("808 + chords + synth in A minor", first)
+        self.assertIn("chords → FL Keys", second)
+        self.assertIn("synth → Padilion", second)
+
+    def test_missing_parts_are_listed(self):
+        self.rack.names[:] = ["Kick", "Snare", "Closed hat"]
+        text = self.window().beat_text(self.engine.new_beat("house"))
+        self.assertIn("No channel for: bass, chords, synth", text)
+        self.assertNotIn("openhat", text)
 
 
 class McpServerTest(unittest.TestCase):

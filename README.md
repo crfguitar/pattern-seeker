@@ -20,18 +20,23 @@ There are two ways to drive it:
 
 ## How it works
 
-```
+```text
  Claude / MCP client                      FL Studio 2026
         │  stdio (MCP)                  ┌──────────────────────────────┐
         ▼                               │ device_PatternSeeker.py      │
- mcp_server.py ──► seeker/engine.py     │ (MIDI controller script)     │
-                     │ generator  (music)        ▲         │           │
-                     │ mapping    (which channel)│         │ channels, │
-                     │ link ── SysEx over loopMIDI ────────┘ patterns  │
-                     │ pianoroll ─► .pyscript + hands-free run in the  │
-                     │              piano roll (chords, pad)           │
+ mcp_server.py ──┐                      │ (MIDI controller script)     │
+                 ├─► seeker/engine.py   │                              │
+ pattern_seeker  │     │ generator  (music)      ▲         │           │
+  .pyw (window) ─┘     │ mapping    (which channel)        │ channels, │
+                       │ link ── SysEx over loopMIDI ──────┘ patterns  │
+                       │ pianoroll ─► .pyscript + hands-free run in    │
+                       │              the piano roll (chords, pad)     │
                                         └──────────────────────────────┘
 ```
+
+Both front ends share one engine (`seeker/engine.py`): the MCP server calls it
+directly, and the window runs the same calls on a worker thread so it never
+freezes while FL writes the pattern.
 
 - **The music** (`seeker/library.py`, `seeker/generator.py`): each genre is a
   vocabulary of interchangeable one/two-bar lane variants plus bar-two
@@ -114,7 +119,7 @@ from anywhere). **◀ Back** undoes. The window uses the same MIDI setup (steps 
 python -m unittest discover tests
 ```
 
-32 tests. They cover the music rules (every 808 note in key, chords voiced close,
+34 tests. They cover the music rules (every 808 note in key, chords voiced close,
 progressions that keep changing). They also load the **real FL controller
 script** against a simulated channel rack and drive it through the real SysEx
 encoder, for both the app's requests and the MCP engine (new beat, then Back

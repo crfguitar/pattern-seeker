@@ -101,6 +101,7 @@ _kernel32 = ctypes.windll.kernel32
 _EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 _user32.GetForegroundWindow.restype = wintypes.HWND
 _user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+_user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 _user32.WindowFromPoint.argtypes = [wintypes.POINT]
 _user32.WindowFromPoint.restype = wintypes.HWND
 _user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
@@ -135,6 +136,17 @@ def find_piano_roll():
     """FL's piano roll window (it is a top-level window of its own), or None."""
     found = _windows(PIANO_ROLL_CLASS, "Piano roll")
     return found[0] if found else None
+
+
+SCRIPT_DIALOG_CLASS = "TScriptDialog"    # what a piano-roll script with createDialog opens
+
+
+def close_script_dialogs():
+    """Close any piano-roll script dialog (without applying it). True if one was open."""
+    found = _windows(SCRIPT_DIALOG_CLASS)
+    for hwnd in found:
+        _user32.PostMessageW(hwnd, 0x10, 0, 0)     # WM_CLOSE = the dialog's X: no changes
+    return bool(found)
 
 
 def bring_forward(hwnd):

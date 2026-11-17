@@ -1,12 +1,17 @@
-"""Headless Pattern Seeker: the same NEW BEAT / Back the window has, as plain calls.
+"""The Pattern Seeker engine: NEW BEAT, Back and status as plain calls.
 
-The tkinter app drives FL with timers so its window never freezes. A server
-(the MCP server in mcp_server.py) wants the opposite: one call that blocks until
-FL has the beat and returns what happened. This module is that, built on the
-same pieces: generator (the music), mapping (which channel plays what), link
-(SysEx over loopMIDI to the FL script) and pianoroll (hands-free chord writing).
+Both front ends use it: the MCP server (mcp_server.py) and the desktop window
+(pattern_seeker.pyw, which runs these calls on a worker thread so it never
+freezes). Each call blocks until FL has answered and returns what happened.
+Built on generator (the music), mapping (which channel plays what), link (SysEx
+over loopMIDI to the FL script) and pianoroll (hands-free chord writing).
+
+Calls are serialised by a lock; `peek` is the one call that never waits, for a
+status display that refreshes while a beat is being written.
 """
 
+import functools
+import threading
 import time
 
 from seeker import link, pianoroll
@@ -60,8 +65,17 @@ def resolve_key(text):
     return KEYS.index(t)
 
 
+def _locked(method):
+    @functools.wraps(method)
+    def run(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return run
+
+
 class Engine:
     def __init__(self, seed=None):
+        self._lock = threading.RLock()
         self.seeker = Seeker(seed)
         self.history = []       # (pattern, previous steps, previous piano rolls)
         self.last_rolls = {}    # pattern -> {role: notes we last wrote to its piano roll}
@@ -106,6 +120,20 @@ class Engine:
         return res
 
     # ---- status ----------------------------------------------------------
+    def peek(self):
+        """(heartbeat or None, problem text) without waiting; None while busy."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return link.heartbeat(), link.problem()
+        finally:
+            self._lock.release()
+
+    @property
+    def can_go_back(self):
+        return bool(self.history)
+
+    @_locked
     def status(self):
         hb = self.heartbeat()
         if not hb:
@@ -125,6 +153,7 @@ class Engine:
         }
 
     # ---- NEW BEAT ------------------------------------------------------
+    @_locked
     def new_beat(self, genre=None, key="C", scale="minor", bass=True, chords=True,
                  pad=True, play=True, set_tempo=False, new_pattern=False):
         hb = self._need_fl()
@@ -196,7 +225,8 @@ class Engine:
             "progression": self._describe(prog, key_i, scale) if prog else None,
             "written": lanes_by_channel,
             "noChannelFor": missing,
-            "warnings": list(res.get("warnings") or []) + problems,
+            "warnings": list(res.get("warnings") or []),
+            "problems": problems,     # piano rolls that couldn't be written
         }
         return self.last_beat
 
@@ -222,6 +252,7 @@ class Engine:
         return names
 
     # ---- Back ------------------------------------------------------------
+    @_locked
     def back(self):
         if not self.history:
             raise SeekerError("Nothing to go back to yet.")
@@ -242,7 +273,7 @@ class Engine:
         problems = self._run_rolls(rolls) if rolls else []
         if rolls:
             self.last_rolls[res["pattern"]] = {r: n for r, _, n in rolls}
-        return {"restoredPattern": res["pattern"], "warnings": problems,
+        return {"restoredPattern": res["pattern"], "problems": problems,
                 "canGoBack": bool(self.history)}
 
     # ---- piano rolls (chords, pad) --------------------------------------
@@ -293,6 +324,10 @@ class Engine:
             deadline = time.time() + 1.6
             while time.time() < deadline:
                 time.sleep(0.06)
+                if pianoroll.close_script_dialogs():
+                    # Ours never opens a dialog: another script ran. Close it so FL
+                    # isn't left blocked, and don't re-run "last script" (that one).
+                    return "FL ran a different piano-roll script; closed it unchanged"
                 now = self._edits()
                 if now is not None and now > before:
                     return ""
