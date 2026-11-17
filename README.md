@@ -85,14 +85,28 @@ There are two ways to drive it:
    claude mcp add pattern-seeker --scope user -- python C:/path/to/pattern-seeker/mcp_server.py
    ```
 
+   For Claude Desktop, add this to `claude_desktop_config.json`:
+
    ```json
-   // Claude Desktop: claude_desktop_config.json
    { "mcpServers": { "pattern-seeker": {
        "command": "python", "args": ["C:/path/to/pattern-seeker/mcp_server.py"] } } }
    ```
 
-Only one program can hold the MIDI ports at a time, so close the Pattern Seeker
+6. Restart the MCP client and ask for a beat, for example *"make me a boom bap
+   beat in D minor"*.
+
+Start loopMIDI before FL Studio: FL looks for MIDI ports when it launches. Only
+one program can hold the MIDI ports at a time, so close the Pattern Seeker
 window while an MCP client is using the server.
+
+### Using the desktop window instead
+
+```bash
+pythonw pattern_seeker.pyw
+```
+
+Pick a genre, key and scale, then press **NEW BEAT** (or Space, or Ctrl+Alt+B
+from anywhere). **◀ Back** undoes. The window uses the same MIDI setup (steps 2-4).
 
 ## Tests
 
