@@ -118,6 +118,48 @@ def _bass(spec, kick, rng):
     return out, list(out)
 
 
+PASSING = "o"     # in a progression: a passing diminished chord (see add_passing)
+
+
+def _target(prog):
+    """The chord a passing diminished chord leads into: the loop's first chord."""
+    return int(next(c for c in prog if c != PASSING))
+
+
+def chord_pcs(ch, prog, key=0, scale="minor", tones=(0, 2, 4)):
+    """Pitch classes (0-11) of the chord `ch` from a progression.
+
+    A digit is a scale degree, stacked in thirds along the scale (`tones` picks
+    which). PASSING is the diminished chord a semitone under the loop's first
+    chord (B dim before C), built from minor thirds, so a four-note voicing
+    gives the full diminished seventh.
+    """
+    steps = SCALES[scale]
+    if ch == PASSING:
+        root = key + steps[_target(prog) - 1] - 1
+        return [(root + 3 * i) % 12 for i in range(len(tones))]
+    d = int(ch)
+    return [(key + steps[(d - 1 + t) % 7]) % 12 for t in tones]
+
+
+def chord_name(ch, prog, key=0, scale="minor"):
+    """'C', 'Am', 'Bdim' ... for one chord of a progression."""
+    root, third, fifth = chord_pcs(ch, prog, key, scale)
+    quality = "" if (third - root) % 12 == 4 else ("dim" if (fifth - root) % 12 == 6 else "m")
+    return KEYS[root] + quality
+
+
+def add_passing(prog):
+    """End the progression on a passing diminished chord that leads back to the top.
+
+    It takes the last two beats, or only the last one when the chord before it
+    would otherwise be left with less than two beats.
+    """
+    run = len(prog) - len(prog.rstrip(prog[-1]))
+    n = 2 if run >= 4 else 1
+    return prog[:-n] + PASSING * n
+
+
 def bass_pitches(degrees, key=0, scale="minor", base=60, prog=None):
     """MIDI note per step for a degree lane. `key` is semitones above C (0-11).
 
@@ -135,7 +177,14 @@ def bass_pitches(degrees, key=0, scale="minor", base=60, prog=None):
         if d == ".":
             out.append(base)
             continue
-        p = int(prog[(i // 4) % len(prog)]) if prog else 1
+        ch = prog[(i // 4) % len(prog)] if prog else "1"
+        if ch == PASSING:
+            # The 808 holds the diminished chord's root: a semitone under the next chord.
+            t = _target(prog)
+            total = steps[t - 1] - (12 if t >= 5 else 0) - 1
+            out.append(root + total)
+            continue
+        p = int(ch)
         chord = steps[p - 1] - (12 if p >= 5 else 0)       # chord root vs key root
         if d == "8":
             move = 12
@@ -163,22 +212,19 @@ def chord_notes(rhythm, prog, key=0, scale="minor", voicing="triad", base=60):
     Every chord tone is folded into the same one-octave window around `base`,
     which gives close voicings that move smoothly from chord to chord.
     """
-    steps, low = SCALES[scale], base - 5
-    notes, start, current, vel = [], None, 0, 96
+    low = base - 5
+    notes, start, current, vel = [], None, "", 96
 
-    def voiced(degree):
-        tones = set()
-        for t in VOICINGS[voicing]:
-            pc = (key + steps[(degree - 1 + t) % 7]) % 12
-            tones.add(low + (pc - low) % 12)
-        return sorted(tones)
+    def voiced(ch):
+        return sorted({low + (pc - low) % 12
+                       for pc in chord_pcs(ch, prog, key, scale, VOICINGS[voicing])})
 
     def close(end):
         if start is not None and end > start:
             notes.extend((n, start, end - start, vel) for n in voiced(current))
 
     for i, c in enumerate(rhythm):
-        degree = int(prog[(i // 4) % len(prog)])
+        degree = prog[(i // 4) % len(prog)]
         if c == "x" or (c == "-" and start is not None and i % 4 == 0 and degree != current):
             close(i)
             start, current, vel = i, degree, (96 if i % 4 == 0 else 84)
@@ -209,14 +255,11 @@ def pad_notes(prog, key=0, scale="minor", base=72, velocity=62):
     A note two neighbouring chords share is tied straight through the change,
     so the pad moves as little as the harmony allows.
     """
-    steps, low = SCALES[scale], base - 5
+    low = base - 5
     held, notes = {}, []                 # held: note -> step it started at
 
-    def chord(degree):
-        return {low + (key + steps[(degree - 1 + t) % 7] - low) % 12 for t in (0, 2, 4)}
-
-    for beat, degree in enumerate(prog):
-        tones = chord(int(degree))
+    for beat, ch in enumerate(prog):
+        tones = {low + (pc - low) % 12 for pc in chord_pcs(ch, prog, key, scale)}
         for n in [n for n in held if n not in tones]:
             start = held.pop(n)
             notes.append((n, start, beat * 4 - start, velocity))

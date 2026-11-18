@@ -15,7 +15,8 @@ import threading
 import time
 
 from seeker import link, pianoroll
-from seeker.generator import CYCLE, KEYS, SCALES, Seeker, bass_pitches, chord_notes, pad_notes
+from seeker.generator import (CYCLE, KEYS, Seeker, add_passing, bass_pitches, chord_name,
+                              chord_notes, pad_notes)
 from seeker.library import GENRES
 from seeker.mapping import build_tracks, map_rack
 
@@ -155,8 +156,18 @@ class Engine:
     # ---- NEW BEAT ------------------------------------------------------
     @_locked
     def new_beat(self, genre=None, key="C", scale="minor", bass=True, chords=True,
-                 pad=True, play=True, set_tempo=False, new_pattern=False):
+                 pad=True, play=True, set_tempo=False, new_pattern=False, tempo=None,
+                 passing=False):
+        """tempo: an exact BPM to set FL to (wins over set_tempo).
+        passing: end the progression on a passing diminished chord."""
         hb = self._need_fl()
+        if tempo is not None:
+            try:
+                tempo = float(tempo)
+            except (TypeError, ValueError):
+                raise SeekerError("tempo must be a number of BPM, like 90.")
+            if not 10 <= tempo <= 522:
+                raise SeekerError("tempo must be between 10 and 522 BPM (FL's range).")
         genre_key = resolve_genre(genre)
         key_i = resolve_key(key)
         scale = (scale or "minor").strip().lower()
@@ -164,12 +175,19 @@ class Engine:
             raise SeekerError("scale must be 'minor' or 'major'.")
         rolemap = map_rack(hb["channels"])
         # Auto genre stays in the project's tempo unless we may change it.
-        beat = self.seeker.next(genre_key, None if (genre_key or set_tempo) else hb["tempo"])
+        # An exact tempo is always used, and steers an auto genre to one that fits it.
+        if tempo is not None:
+            beat = self.seeker.next(genre_key, tempo)
+            beat.tempo, set_tempo = tempo, True
+        else:
+            beat = self.seeker.next(genre_key, None if (genre_key or set_tempo) else hb["tempo"])
         keys_ch = rolemap.get("chords") if chords else None
         pad_ch = rolemap.get("pad") if pad else None
         # With chords or a pad everything follows one four-bar progression and
         # the 808 plays the root of whichever chord is sounding.
         prog = beat.chords["progs"][scale] if (keys_ch or pad_ch) else None
+        if prog and passing:
+            prog = add_passing(prog)
         lanes, pitches = dict(beat.lanes), None
         if not bass:
             del lanes["bass"]
@@ -234,22 +252,13 @@ class Engine:
     def _describe(prog, key, scale):
         """'1111666644445555' in C major -> ['C', 'Am', 'F', 'G'] (one per change),
         with the beats each chord lasts."""
-        steps = SCALES[scale]
         out = []
         for ch in prog:
             if out and out[-1][0] == ch:
                 out[-1][1] += 1
             else:
                 out.append([ch, 1])
-        names = []
-        for ch, beats in out:
-            d = int(ch) - 1
-            root = steps[d]
-            third = (steps[(d + 2) % 7] - root) % 12
-            fifth = (steps[(d + 4) % 7] - root) % 12
-            quality = "" if third == 4 else ("dim" if fifth == 6 else "m")
-            names.append({"chord": KEYS[(key + root) % 12] + quality, "beats": beats})
-        return names
+        return [{"chord": chord_name(ch, prog, key, scale), "beats": beats} for ch, beats in out]
 
     # ---- Back ------------------------------------------------------------
     @_locked

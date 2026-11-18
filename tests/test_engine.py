@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_seeker import FakeRack, load_script, Event  # noqa: E402
 from seeker import engine as engine_mod, link, wire  # noqa: E402
 from seeker.engine import Engine, SeekerError, resolve_genre, resolve_key  # noqa: E402
+from seeker.generator import KEYS  # noqa: E402
 
 
 class FakeLink:
@@ -150,6 +151,31 @@ class EngineTest(EngineFixture):
         a = self.engine.new_beat("boom bap", chords=False, pad=False)
         b = self.engine.new_beat("boom bap", chords=False, pad=False)
         self.assertNotEqual(a["tag"], b["tag"])
+
+    def test_exact_tempo_is_set(self):
+        out = self.engine.new_beat("boom bap", key="C", scale="major", tempo=90)
+        self.assertEqual(out["tempo"], 90.0)
+        self.assertEqual(self.rack.tempo, 90.0)
+        auto = self.engine.new_beat(tempo="140")
+        self.assertEqual(self.rack.tempo, 140.0)
+        self.assertNotIn(auto["genre"], ("Boom Bap", "Lo-Fi", "R&B"))
+        for bad in ("fast", 5, 900):
+            with self.assertRaises(SeekerError):
+                self.engine.new_beat("house", tempo=bad)
+
+    def test_passing_diminished_chord_ends_the_progression(self):
+        for _ in range(6):
+            out = self.engine.new_beat("boom bap", key="C", scale="major", passing=True)
+            prog = out["progression"]
+            self.assertTrue(prog[-1]["chord"].endswith("dim"), prog)
+            self.assertIn(prog[-1]["beats"], (1, 2))
+            self.assertGreaterEqual(prog[-2]["beats"], 1)
+            self.assertEqual(sum(c["beats"] for c in prog), 16)
+            # a semitone under the first chord, so it leads back to the top
+            first = prog[0]["chord"].rstrip("m")
+            self.assertEqual((KEYS.index(prog[-1]["chord"][:-3]) + 1) % 12, KEYS.index(first))
+        plain = self.engine.new_beat("boom bap", key="C", scale="major")
+        self.assertFalse(any(c["chord"].endswith("dim") for c in plain["progression"]))
 
     def test_bad_input_is_explained(self):
         with self.assertRaises(SeekerError):

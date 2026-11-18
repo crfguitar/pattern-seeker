@@ -70,7 +70,7 @@ freezes while FL writes the pattern.
 | --- | --- |
 | `fl_status` | Connection, current pattern, tempo, transport, and each channel with the role Pattern Seeker gives it |
 | `list_genres` | The 17 genres and the tempo range each is idiomatic at |
-| `new_beat` | `genre` (or `auto` = fits the project tempo), `key`, `scale`, toggles for `bass` / `chords` / `pad`, `play`, `set_tempo`, `new_pattern`. Returns the genre, the chord progression (for example `Am(8) F(4) G(4)`), which channel got which part, and warnings |
+| `new_beat` | `genre` (or `auto` = fits the project tempo), `key`, `scale`, toggles for `bass` / `chords` / `pad`, `play`, `set_tempo`, `new_pattern`, `tempo` (exact BPM, e.g. 90), `passing` (end on a passing diminished chord that leads back to the first chord). Returns the genre, the chord progression (for example `Am(8) F(4) G(4)`), which channel got which part, and warnings |
 | `back` | Undo the last `new_beat`, again and again (50 deep) |
 
 ### Setup

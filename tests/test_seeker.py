@@ -184,6 +184,23 @@ class Generator(unittest.TestCase):
         exec(compile(pianoroll.script_source([]), "chords.pyscript", "exec"), {})
         self.assertEqual([n.number for n in fake.score.notes], [72, 74])
 
+    def test_passing_diminished_chord(self):
+        from seeker.generator import PASSING, add_passing, chord_name
+        self.assertEqual(add_passing("1111555566664444"), "11115555666644" + PASSING * 2)
+        self.assertEqual(add_passing("1166225511662253"), "116622551166225" + PASSING)
+        prog = add_passing("1111555566664444")
+        self.assertEqual(chord_name(PASSING, prog, 0, "major"), "Bdim")
+        self.assertEqual(chord_name(PASSING, "6" + prog[1:], 0, "major"), "G#dim")
+        self.assertEqual(chord_name(PASSING, prog, 0, "minor"), "Bdim")
+        # keys: B D F (Ab with a seventh voicing); pad: B D F; 808: B under the C root
+        tones = {n % 12 for n, s, _, _ in chord_notes("x---" * 16, prog, 0, "major", "seventh")
+                 if s >= 56}
+        self.assertEqual(tones, {11, 2, 5, 8})
+        self.assertEqual({n % 12 for n, s, l, _ in pad_notes(prog, 0, "major") if s <= 56 < s + l},
+                         {11, 2, 5})
+        bass = bass_pitches(["1"] * 64, 0, "major", prog=prog)
+        self.assertEqual(bass[0] - bass[63], 1)
+
     def test_auto_genre_follows_tempo(self):
         self.assertIn("trap", genres_for_tempo(140))
         self.assertNotIn("boombap", genres_for_tempo(140))

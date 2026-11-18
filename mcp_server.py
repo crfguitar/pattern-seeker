@@ -64,7 +64,8 @@ def fl_status() -> dict:
 def new_beat(genre: str = "auto", key: str = "C", scale: str = "minor",
              bass: bool = True, chords: bool = True, pad: bool = True,
              play: bool = True, set_tempo: bool = False,
-             new_pattern: bool = False) -> dict:
+             new_pattern: bool = False, tempo: float | None = None,
+             passing: bool = False) -> dict:
     """Write a fresh beat onto FL Studio's current pattern (or a new one).
 
     genre: a name from list_genres, or 'auto' to pick one that fits the project tempo.
@@ -72,6 +73,10 @@ def new_beat(genre: str = "auto", key: str = "C", scale: str = "minor",
     bass / chords / pad: write the 808 line, the keys chords, the synth pad.
       A part that is off leaves its channel exactly as it was.
     play: start FL's transport. set_tempo: change FL's tempo to suit the genre.
+    tempo: an exact BPM (e.g. 90) to set FL to; use it whenever the user names a
+      tempo. With genre 'auto' it also picks a genre that fits that tempo.
+    passing: end the progression on a passing diminished chord a semitone under the
+      first chord (B dim leading back to C), on the last beat or two of bar four.
     new_pattern: write into a new empty pattern instead of the selected one.
 
     Only channels recognised as drums/808/keys/synth are touched. Returns the
@@ -79,7 +84,8 @@ def new_beat(genre: str = "auto", key: str = "C", scale: str = "minor",
     FL briefly opens the piano roll while chords are written - that is expected."""
     try:
         return dict(ok=True, **engine.new_beat(genre, key, scale, bass, chords, pad,
-                                               play, set_tempo, new_pattern))
+                                               play, set_tempo, new_pattern, tempo,
+                                               passing))
     except SeekerError as e:
         return _fail(e)
 
