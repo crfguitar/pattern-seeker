@@ -1,5 +1,9 @@
 # Pattern Seeker
 
+
+https://github.com/user-attachments/assets/a4e42051-d261-47b2-9309-70b2c10e83f5
+
+
 **Genre-true beats in FL Studio, from one button or from an AI assistant.**
 
 Pattern Seeker writes a complete starting point into FL Studio's current pattern:
