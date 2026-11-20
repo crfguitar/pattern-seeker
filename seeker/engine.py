@@ -14,7 +14,7 @@ import functools
 import threading
 import time
 
-from seeker import kits, link, pianoroll, sounds
+from seeker import eq, kits, link, pianoroll, playlist, sounds
 from seeker.generator import (CYCLE, KEYS, Seeker, add_passing, bass_pitches, chord_name, in_register,
                               chord_notes, pad_notes)
 from seeker.library import GENRES
@@ -163,8 +163,9 @@ class Engine:
     @_locked
     def new_beat(self, genre=None, key="C", scale="minor", bass=True, chords=True,
                  pad=True, play=True, set_tempo=False, new_pattern=False, tempo=None,
-                 passing=False, build=False, guitar=True):
+                 passing=False, build=False, guitar=True, drums=True):
         """tempo: an exact BPM to set FL to (wins over set_tempo).
+        drums: False leaves the drums out (a breakdown); their channels are emptied.
         passing: end the progression on a passing diminished chord.
         build: first add a channel for every part of the genre's kit the rack lacks."""
         hb = self._need_fl()
@@ -210,6 +211,8 @@ class Engine:
         # under the 808's, and no note leaves it.
         register = kits.bass_range(rolemap["bass"]["name"]) if "bass" in rolemap else None
         base = 36 if register else 60
+        if not drums:
+            lanes.update({r: [0] * len(v) for r, v in lanes.items() if r != "bass"})
         if not bass:
             del lanes["bass"]
         elif prog:
@@ -371,8 +374,13 @@ class Engine:
 
     @staticmethod
     def _find_channel(rack, channel):
-        if isinstance(channel, str) and channel.strip().lstrip("-").isdigit():
-            channel = int(channel.strip())
+        if isinstance(channel, str):
+            want = channel.strip().lower()
+            for ch in rack:             # a name wins: "808" is a channel, not index 808
+                if ch["name"].lower() == want:
+                    return ch
+            if want.lstrip("-").isdigit():
+                channel = int(want)
         if isinstance(channel, int) and not isinstance(channel, bool):
             for ch in rack:
                 if ch["index"] == channel:
@@ -431,7 +439,10 @@ class Engine:
                 out["problems"].append("%s: %s" % (role, e))
                 return out
             out["added"].append({"part": role, "channel": made["channel"],
-                                 "name": made["name"], "sound": made["sound"]})
+                                 "name": made["name"], "sound": made["sound"],
+                                 "insert": made.get("insert")})
+            out["problems"] += ["%s: %s" % (made["name"], w) for w in made["warnings"]
+                                if w.startswith("not routed")]
         return out
 
     @staticmethod
@@ -473,11 +484,13 @@ class Engine:
                 "sounds": [{"kind": it["kind"], "id": it["id"]} for it in found[:limit]]}
 
     @_locked
-    def add_channel(self, sound, name=None, color=None, volume=None, pan=None, show=False):
+    def add_channel(self, sound, name=None, color=None, volume=None, pan=None, show=False,
+                    route=True):
         """Load an instrument or a sample into a NEW channel at the end of the rack.
 
         FL itself opens the file (see sounds.py); we watch the rack for the channel
-        to appear, then name and colour it and close the plugin window it opened."""
+        to appear, then name and colour it and close the plugin window it opened.
+        route: send it through its own mixer insert, named after it (route_channels)."""
         hb = self._need_fl()
         change = self._channel_change(name, color, volume, pan)
         try:
@@ -511,11 +524,167 @@ class Engine:
         res = self._apply({"cmd": "channel", "channel": new["index"], "name": new["name"],
                            "set": change, "editor": bool(show)})
         info = res["channel"]
-        roles = {ch["index"]: role for role, ch in
-                 map_rack((res.get("state") or {}).get("channels") or []).items()}
-        return {"channel": info["index"], "name": info["name"], "plugin": info.get("plugin", ""),
-                "sound": item["id"], "kind": item["kind"], "role": roles.get(info["index"]),
-                "warnings": list(res.get("warnings") or [])}
+        rack_now = (res.get("state") or {}).get("channels") or []
+        roles = {ch["index"]: role for role, ch in map_rack(rack_now).items()}
+        out = {"channel": info["index"], "name": info["name"], "plugin": info.get("plugin", ""),
+               "sound": item["id"], "kind": item["kind"], "role": roles.get(info["index"]),
+               "warnings": list(res.get("warnings") or [])}
+        if route:
+            try:
+                done = self._route([dict(c, **info) if c["index"] == info["index"] else c
+                                    for c in rack_now] or [info], [info["index"]])
+                if done["routed"]:
+                    out["insert"] = done["routed"][0]["insert"]
+                out["warnings"] += done["warnings"]
+            except SeekerError as e:
+                out["warnings"].append("not routed to a mixer insert: %s" % e)
+        return out
+
+    # ---- EQ on the mixer inserts (CFilteR-01) ---------------------------------
+    @_locked
+    def eq(self, channel, bands, clear=True):
+        """Set CFilteR-01 on `channel`'s mixer insert: bands in real units
+        ([{shape, freq, gain, q, slope, band?, on?}]). clear: every other band off."""
+        hb = self._need_fl()
+        return self._eq_channel(self._find_channel(hb["channels"], channel), bands, clear)
+
+    @_locked
+    def mix_eq(self, genre, clear=True):
+        """Give every part the genre's starting EQ (kits.eq_for) on its insert."""
+        hb = self._need_fl()
+        genre_key = resolve_genre(genre)
+        if genre_key is None:
+            raise SeekerError("mix_eq needs a genre (the EQ suits the genre's sounds).")
+        rolemap, _ = fit_rack(hb["channels"], genre_key)
+        out = {"genre": GENRES[genre_key]["name"], "channels": [], "problems": []}
+        for role in kits.ROLES:
+            ch = rolemap.get(role)
+            bands = kits.eq_for(genre_key, role) if ch else []
+            if not bands:
+                continue
+            try:
+                done = self._eq_channel(ch, bands, clear)
+                out["channels"].append(dict(done, part=role))
+            except SeekerError as e:
+                out["problems"].append("%s: %s" % (ch["name"], e))
+        return out
+
+    def _eq_channel(self, ch, bands, clear):
+        if not isinstance(bands, (list, tuple)):
+            raise SeekerError("bands must be a list like [{\"shape\": \"low cut\", "
+                              "\"freq\": 40}].")
+        insert = ch.get("insert")
+        if not insert:
+            raise SeekerError("%s plays straight into the master; route_channels gives it "
+                              "an insert first." % ch["name"])
+        res = self._apply({"cmd": "mixer", "track": insert, "slots": True})
+        slot = next((s for s, name, _ in res.get("slots", [])
+                     if eq.PLUGIN.lower() in name.lower()), None)
+        if slot is None:
+            raise SeekerError("No %s on insert %d (%s). Put one in a slot of that insert."
+                              % (eq.PLUGIN, insert, res.get("trackName", "")))
+        try:
+            rows, used = eq.band_sets(slot, bands)
+        except eq.EqError as e:
+            raise SeekerError(str(e))
+        clears = eq.clear_sets(slot, used) if clear else []
+        self._apply({"cmd": "mixer", "track": insert, "set": rows + clears})
+        # FL hands a VST's new value back one request late: setting the same values
+        # again returns what the plugin now holds, in its own words.
+        back = self._apply({"cmd": "mixer", "track": insert, "set": rows})
+        got = back.get("set", [])
+        warnings = list(back.get("warnings") or [])
+        for _ in range(2):      # seen live once: one band read back at its old value
+            wanted = {r[1]: r[2] for r in rows}
+            off = [r for r in rows if not any(g[1] == r[1] and abs(g[3] - wanted[r[1]]) < 1e-3
+                                              for g in got)]
+            if not off:
+                break
+            self._apply({"cmd": "mixer", "track": insert, "set": off})
+            again = self._apply({"cmd": "mixer", "track": insert, "set": off})
+            fixed = {g[1]: g for g in again.get("set", [])}
+            got = [fixed.get(g[1], g) for g in got]
+        else:
+            warnings.append("%d settings didn't read back as set: %s" % (
+                len(off), ", ".join(g[2] for g in got if g[1] in {r[1] for r in off})))
+        shown = eq.describe(got)
+        return {"channel": ch["name"], "insert": insert, "insertName": res.get("trackName"),
+                "slot": slot + 1, "bands": [shown.get("Band %d" % n, "") for n in sorted(used)],
+                "warnings": warnings}
+
+    # ---- mixer routing ------------------------------------------------------
+    MIXER_INSERTS = 125     # FL 2026: inserts 1-125 (0 is the master)
+
+    @_locked
+    def route_channels(self, channels=None, reroute=False):
+        """Give channels their own mixer insert, named and coloured after the channel.
+
+        channels: rack indexes or names; default every channel still going straight
+        to the master. reroute: also move channels that already have an insert."""
+        hb = self._need_fl()
+        rack = hb["channels"]
+        if channels:
+            picked = [self._find_channel(rack, c)["index"] for c in channels]
+        else:
+            picked = [c["index"] for c in rack]
+        if not reroute:
+            picked = [i for i in picked if not rack[i].get("insert")]
+        if not picked:
+            return {"routed": [], "kept": [{"channel": c["name"], "insert": c.get("insert")}
+                                           for c in rack if c.get("insert")], "warnings": []}
+        return self._route(rack, picked)
+
+    def _route(self, rack, picked):
+        """Route rack channels `picked` (indexes) to free inserts.
+
+        An insert is taken when a channel already plays through it or the user gave
+        it a name. Each channel gets, in order of preference: a free-standing insert
+        named like it (a template's labelled insert), insert N for rack index N, then
+        the lowest free insert."""
+        res = self._ask({"cmd": "mixer", "names": self.MIXER_INSERTS}, timeout=4.0)
+        if res is None or "names" not in res:
+            raise SeekerError("FL Studio didn't list its mixer inserts (reload the Pattern "
+                              "Seeker script in FL: it needs version 16 or newer).")
+        names = res["names"]
+        by_index = {c["index"]: c for c in rack}
+        routed_to = {c.get("insert") for c in rack if c["index"] not in picked} - {0, None}
+        named = {t for t, n in enumerate(names, 1) if n.strip() != "Insert %d" % t}
+        taken = set(routed_to)
+        spots = {}
+        # 1: a labelled insert nobody plays through, waiting for this channel
+        for i in picked:
+            want = by_index[i]["name"].strip().lower()
+            spot = next((t for t, n in enumerate(names, 1)
+                         if n.strip().lower() == want and t not in taken), None)
+            if spot is not None:
+                spots[i] = spot
+                taken.add(spot)
+
+        def free(t):
+            return 1 <= t <= len(names) and t not in taken and t not in named
+        # 2: insert N for rack index N. A project starts with FL's Sampler at index
+        #    0, so the first instrument added lands on insert 1 (the user's way).
+        for i in picked:
+            if i not in spots and free(i):
+                spots[i] = i
+                taken.add(i)
+        # 3: the lowest free insert
+        for i in picked:
+            if i not in spots:
+                spot = next((t for t in range(1, len(names) + 1) if free(t)), None)
+                if spot is None:
+                    raise SeekerError("Every mixer insert is in use or named.")
+                spots[i] = spot
+                taken.add(spot)
+        routes, out = [], []
+        for i in picked:
+            ch = by_index[i]
+            routes.append([i, spots[i], ch["name"], ch.get("color")])
+        res = self._apply({"cmd": "mixer", "routes": routes})
+        for ch_i, insert, label in res.get("routes", []):
+            out.append({"channel": by_index[ch_i]["name"], "index": ch_i, "insert": insert,
+                        "insertName": label})
+        return {"routed": out, "warnings": list(res.get("warnings") or [])}
 
     @staticmethod
     def _channel_change(name, color, volume, pan):
@@ -675,12 +844,169 @@ class Engine:
             paramCount=res.get("paramCount", 0), matching=res.get("matching", 0),
                     params=[self._param(p) for p in res.get("params", [])]))
 
+    # ---- the song: patterns laid out in the playlist ------------------------
+    # What each letter of a song structure is, and how it differs from the rest.
+    SECTIONS = {
+        "A": ("Verse", 0x4C8BF5, {"pad": False}),       # leaner: no pad
+        "B": ("Chorus", 0xF5A623, {}),                  # everything
+        "C": ("Bridge", 0x9B59B6, {"drums": False}),    # a breakdown: no drums
+    }
+    MAX_CLIPS = 200
+
+    def _song(self, **fields):
+        res = self._ask(dict(fields, cmd="song"), 4.0)
+        if res is None:
+            raise SeekerError("FL Studio didn't answer in time.")
+        if not res.get("ok"):
+            raise SeekerError("FL error: %s" % (res.get("detail") or res.get("error")))
+        return res
+
+    @_locked
+    def arrange(self, sections, track=1, start_bar=None, song_mode=True):
+        """Lay patterns out along a playlist track, one section after another.
+
+        sections: pattern numbers, or {"pattern": n, "bars": 8}; a pattern
+        shorter than its section is repeated to fill it. start_bar: where the
+        first one starts; None = where the song ends now (bar 1 when empty)."""
+        self._need_fl()
+        wanted = []
+        for item in sections or []:
+            if isinstance(item, dict):
+                item = (item.get("pattern"), item.get("bars"))
+            elif not isinstance(item, (list, tuple)):
+                item = (item, None)
+            try:
+                pattern = int(item[0])
+                bars = int(item[1]) if len(item) > 1 and item[1] else None
+            except (TypeError, ValueError):
+                raise SeekerError("sections must be pattern numbers, or "
+                                  '{"pattern": 2, "bars": 8}.')
+            if pattern < 1 or (bars is not None and bars < 1):
+                raise SeekerError("Pattern numbers and bars start at 1.")
+            wanted.append((pattern, bars))
+        if not wanted:
+            raise SeekerError("Give at least one pattern to place.")
+        try:
+            track = int(track)
+            start_bar = None if start_bar is None else int(start_bar)
+        except (TypeError, ValueError):
+            raise SeekerError("track and start_bar must be whole numbers.")
+        if start_bar is not None and start_bar < 1:
+            raise SeekerError("Bars are counted from 1.")
+        info = self._song(lengths=[p for p, _ in wanted])
+        per_bar = int(info["ticksPerBar"])
+        steps_per_bar = max(1, per_bar * 4 // int(info["ppq"]))
+        before = int(info.get("songTicks") or 0)
+        bar = start_bar or (before + 1) // per_bar + 1
+        first, clips, laid = bar, [], []
+        for (pattern, bars), steps in zip(wanted, info["lengths"]):
+            length = max(1, -(-int(steps) // steps_per_bar))
+            count = -(-(bars or length) // length)
+            laid.append({"pattern": pattern, "bar": bar, "bars": count * length,
+                         "clips": count})
+            for _ in range(count):
+                clips.append((pattern, bar))
+                bar += length
+        if len(clips) > self.MAX_CLIPS:
+            raise SeekerError("That is %d clips - %d at most in one go."
+                              % (len(clips), self.MAX_CLIPS))
+        try:
+            out = playlist.place_clips(self._song, clips, track)
+        except playlist.PlaylistError as e:
+            if e.placed:
+                self.history.append(("clips", len(e.placed), before))
+            raise SeekerError("%s %d of %d clips were placed%s." % (
+                e, len(e.placed), len(clips),
+                " (back takes them out)" if e.placed else ""))
+        self.history.append(("clips", len(clips), before))
+        del self.history[:-50]
+        if song_mode:
+            self._song(songMode=True)
+            time.sleep(0.1)     # FL reports the old mode in the answer that changes it
+        mode = self._song()
+        return {"track": track, "startBar": first, "endBar": bar - 1, "sections": laid,
+                "clips": len(clips), "songMode": bool(mode.get("songMode")),
+                "warnings": list(out.get("warnings") or [])}
+
+    @_locked
+    def new_song(self, genre=None, key="C", scale="minor", structure="ABABCB", bars=8,
+                 tempo=None, set_tempo=False, build=False, track=1, start_bar=None,
+                 bass=True, chords=True, pad=True, guitar=True, passing=False):
+        """A whole song: one new pattern per letter of `structure` (A verse, B
+        chorus, C bridge - same genre, key and tempo, each its own groove and
+        progression), then the letters laid out in the playlist, `bars` each."""
+        letters = [c for c in str(structure or "").upper() if c.isalpha()]
+        if not letters:
+            raise SeekerError("structure is letters, one per section, like ABABCB.")
+        if len(set(letters)) > 8:
+            raise SeekerError("At most 8 different sections.")
+        try:
+            bars = int(bars)
+        except (TypeError, ValueError):
+            raise SeekerError("bars must be a whole number.")
+        if not 1 <= bars <= 64:
+            raise SeekerError("bars (per section) must be between 1 and 64.")
+        hb = self._need_fl()
+        genre_key = resolve_genre(genre)
+        if not genre_key:       # auto: one genre for the whole song
+            fit = tempo if tempo is not None else (None if set_tempo else hb["tempo"])
+            genre_key = self.seeker.next(None, fit).genre
+        made, built = {}, None
+        for letter in dict.fromkeys(letters):
+            title, color, change = self.SECTIONS.get(letter, ("Part " + letter, 0x5F9E6E, {}))
+            first = not made
+            options = dict(bass=bass, chords=chords, pad=pad, guitar=guitar, drums=True)
+            if first and build:
+                # the whole kit now, whatever this section leaves out
+                skip = [r for r in ("bass", "chords", "pad", "guitar") if not options[r]]
+                built = self.build_rack(genre_key, [r for r in kits.ROLES if r not in skip])
+                self._settled_rack(len(hb["channels"]) + len(built["added"]))
+            options.update({k: v and options[k] for k, v in change.items()})
+            beat = self.new_beat(genre_key, key, scale, play=False, new_pattern=True,
+                                 tempo=tempo if first else None,
+                                 set_tempo=set_tempo and first, passing=passing, **options)
+            if beat["problems"]:
+                # A piano roll that didn't take (it happens on the first beat after
+                # channels were added): once more, on the same pattern.
+                beat = self.new_beat(genre_key, key, scale, play=False, passing=passing,
+                                     **options)
+            name ="%s - %s" % (title, beat["patternName"])
+            self._song(pattern=beat["pattern"], name=name, color=color)
+            made[letter] = dict(beat, section=title, patternName=name)
+        laid = self.arrange([(made[c]["pattern"], bars) for c in letters], track, start_bar)
+        for row, letter in zip(laid["sections"], letters):
+            row["section"] = made[letter]["section"]
+        first = made[letters[0]]
+        out = {"genre": first["genre"], "key": first["key"], "tempo": first["tempo"],
+               "structure": "".join(letters), "arrangement": laid,
+               "patterns": [{"section": m["section"], "letter": c, "pattern": m["pattern"],
+                             "patternName": m["patternName"],
+                             "progression": m["progression"], "written": m["written"],
+                             "noChannelFor": m["noChannelFor"],
+                             "warnings": m["warnings"], "problems": m["problems"]}
+                            for c, m in made.items()]}
+        if built:
+            out["built"] = built
+        return out
+
     # ---- Back ------------------------------------------------------------
     @_locked
     def back(self):
         if not self.history:
             raise SeekerError("Nothing to go back to yet.")
         hb = self._need_fl()
+        if self.history[-1][0] == "clips":
+            # Clips come out the way they went in: one FL undo step each.
+            _, count, before = self.history.pop()
+            self._song(undo=count)
+            time.sleep(0.2)
+            after = int(self._song().get("songTicks") or 0)
+            out = {"removedClips": count, "problems": [], "canGoBack": bool(self.history)}
+            if after != before:
+                out["problems"].append(
+                    "The song isn't the length it was before - if something else was "
+                    "edited in FL since, that was undone instead: redo with Ctrl+Alt+Z.")
+            return out
         pattern, tracks, old_rolls = self.history[-1]
         if hb["pattern"] != pattern:
             raise SeekerError("Back restores Pattern %s - select it in FL first." % pattern)

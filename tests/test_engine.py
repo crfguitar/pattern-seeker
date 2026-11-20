@@ -403,6 +403,103 @@ class ChannelsTest(SoundsFixture):
             self.engine.channel_params("Tuba")
 
 
+class RoutingTest(SoundsFixture):
+    def test_unrouted_channels_get_their_own_named_insert(self):
+        out = self.engine.route_channels()
+        got = {r["channel"]: r["insert"] for r in out["routed"]}
+        # insert N for index N; index 0 can't use the master, so it takes the
+        # lowest insert left over and nobody else moves
+        self.assertEqual(got, {"Kick": 7, "Clap": 1, "Closed hat": 2, "Snare": 3,
+                               "808": 4, "FL Keys": 5, "Padilion": 6})
+        self.assertEqual(self.rack.inserts[3], 3)
+        self.assertEqual(self.rack.insert_names[3], "Snare")
+        self.assertIn(3, self.rack.insert_colors)
+        self.assertEqual(self.engine.status()["channels"][3]["insert"], 3)
+        self.assertEqual(self.engine.route_channels()["routed"], [])   # nothing left
+
+    def test_template_labels_and_taken_inserts_are_respected(self):
+        self.rack.inserts[1] = 2                 # Clap already plays through insert 2
+        self.rack.insert_names[9] = "Snare"      # a template's labelled insert
+        self.rack.insert_names[4] = "Vocals"     # named by the user: not free
+        out = self.engine.route_channels(["Snare", "808", "Clap"])
+        got = {r["channel"]: r["insert"] for r in out["routed"]}
+        self.assertEqual(got, {"Snare": 9, "808": 1})   # Clap kept, insert 4 skipped
+        # reroute: Clap's own insert counts as free again, so it stays and gets named
+        moved = self.engine.route_channels(["Clap"], reroute=True)["routed"]
+        self.assertEqual(moved[0]["insert"], 2)
+        self.assertEqual(self.rack.insert_names[2], "Clap")
+
+    def test_add_channel_routes_the_new_channel(self):
+        out = self.engine.add_channel("flex", name="Pad 2")
+        self.assertEqual((out["channel"], out["insert"]), (7, 7))
+        self.assertEqual(self.rack.insert_names[7], "Pad 2")
+        out = self.engine.add_channel("Drums/Kicks/909 Kick", name="Kick 2", route=False)
+        self.assertNotIn("insert", out)
+        self.assertNotIn(8, self.rack.inserts)
+
+
+BAND_PARAMS = ["Used", "Enabled", "Frequency", "Gain", "Q", "Shape", "Slope"] + [
+    "Extra %d" % i for i in range(17)]
+
+
+def fake_cfilter():
+    """CFilteR-01's parameter layout: 24 bands of 24 parameters, all bands unused."""
+    return {"name": "CFilteR-01", "params": [
+        ["Band %d %s" % (n, p), {"Used": 0.0, "Enabled": 1.0, "Frequency": 0.575188,
+                                 "Gain": 0.5, "Q": 0.5, "Slope": 0.2}.get(p, 0.0)]
+        for n in range(1, 25) for p in BAND_PARAMS]}
+
+
+class EqTest(SoundsFixture):
+    def setUp(self):
+        super().setUp()
+        self.engine.route_channels()        # Kick 7, Clap 1, ... Padilion 6
+
+    def value(self, insert, band, param):
+        return self.rack.fx[(insert, 0)]["params"][(band - 1) * 24 + BAND_PARAMS.index(param)][1]
+
+    def test_curves_match_the_plugin(self):
+        from seeker import eq
+        self.assertAlmostEqual(eq.norm_freq(40), 0.17315, places=5)     # read "40.000 Hz" live
+        self.assertAlmostEqual(eq.norm_freq(1000), 0.575188, places=5)
+        self.assertAlmostEqual(eq.norm_gain(-2), 0.466667, places=5)    # "-2.00 dB"
+        self.assertAlmostEqual(eq.norm_q(1), 0.5)
+        self.assertAlmostEqual(eq.norm_slope(12), 0.2)                   # "12 dB/oct"
+        self.assertAlmostEqual(eq.norm_slope(72), 0.8)
+        self.assertEqual(eq.norm_slope("brickwall"), 1.0)
+        self.assertAlmostEqual(eq.norm_shape("high pass"), 2 / 9.0)     # "Low Cut"
+        with self.assertRaises(eq.EqError):
+            eq.norm_shape("wobble")
+
+    def test_eq_sets_bands_on_the_channels_insert_and_clears_the_rest(self):
+        self.rack.fx[(5, 0)] = fake_cfilter()   # FL Keys plays through insert 5
+        self.rack.fx[(5, 0)]["params"][4 * 24][1] = 1.0     # an old band 5 in use
+        out = self.engine.eq("FL Keys", [{"shape": "low cut", "freq": 140, "slope": 12},
+                                         {"shape": "bell", "freq": 320, "gain": -2}])
+        self.assertEqual((out["insert"], out["slot"], len(out["bands"])), (5, 1, 2))
+        self.assertEqual(self.value(5, 1, "Used"), 1.0)
+        self.assertAlmostEqual(self.value(5, 1, "Shape"), 2 / 9.0)
+        self.assertAlmostEqual(self.value(5, 2, "Gain"), 28 / 60.0)
+        self.assertEqual(self.value(5, 5, "Used"), 0.0)     # cleared
+
+    def test_eq_explains_what_is_missing(self):
+        with self.assertRaisesRegex(SeekerError, "No CFilteR-01 on insert 5"):
+            self.engine.eq("FL Keys", [{"freq": 100}])
+        self.rack.inserts[2] = 0                # Closed hat back on the master
+        with self.assertRaisesRegex(SeekerError, "route_channels"):
+            self.engine.eq("Closed hat", [{"freq": 100}])
+
+    def test_mix_eq_gives_each_part_the_genres_bands(self):
+        for insert in range(1, 11):
+            self.rack.fx[(insert, 0)] = fake_cfilter()
+        out = self.engine.mix_eq("house")
+        parts = {c["part"]: c["insert"] for c in out["channels"]}
+        self.assertEqual(parts["kick"], 7)
+        self.assertEqual(out["problems"], [])
+        from seeker import eq
+        self.assertAlmostEqual(self.value(7, 1, "Frequency"), eq.norm_freq(30))
+
+
 class KitsTest(SoundsFixture):
     TRAP = ["808 Kick", "808 Snare", "808 Clap", "808 Hat", "808 Open hat", "808 Perc",
             "808 Bass", "Piano", "Pad"]
@@ -449,7 +546,7 @@ class KitsTest(SoundsFixture):
         self.assertEqual(out["problems"], [])
         self.assertEqual(self.rack.names, self.TRAP)
         self.assertEqual(out["added"][0], {"part": "kick", "channel": 0, "name": "808 Kick",
-                                           "sound": "Drums/Kicks/808 Kick"})
+                                           "sound": "Drums/Kicks/808 Kick", "insert": 1})
         self.assertTrue(out["added"][6]["sound"].startswith(("FLEX/Core 808s/", "Presets/")))
         self.assertEqual(self.rack.props[8]["volume"], 0.5)
         again = self.engine.build_rack("trap")              # nothing is added twice
@@ -679,8 +776,10 @@ class McpServerTest(unittest.TestCase):
 
         names, genres = asyncio.run(run())
         self.assertEqual(names, {"list_genres", "fl_status", "new_beat", "write_part", "back",
+                                 "new_song", "arrange",
                                  "list_sounds", "add_channel", "channel_params",
-                                 "set_channel", "build_rack"})
+                                 "set_channel", "build_rack", "route_channels", "eq",
+                                 "mix_eq"})
         self.assertFalse(getattr(genres, "is_error", getattr(genres, "isError", False)))
         self.assertIn("Trap", str(genres.content))
 

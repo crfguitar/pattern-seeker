@@ -22,7 +22,7 @@ Packet layout (mirrored in seeker/wire.py):
 FL rules that matter here: no threads, and nothing may raise out of a callback.
 """
 
-SCRIPT_VERSION = 13
+SCRIPT_VERSION = 16
 
 _ok = False
 _err = ""
@@ -132,7 +132,8 @@ def _snapshot():
     for i in range(int(channels.channelCount())):
         try:
             chans.append({"index": i, "name": str(channels.getChannelName(i)),
-                          "plugin": _instrument(i)})
+                          "plugin": _instrument(i), "insert": _insert(i),
+                          "color": int(channels.getChannelColor(i)) & 0xFFFFFF})
         except Exception:
             pass
     try:
@@ -352,8 +353,17 @@ def _named(req):
     return ch
 
 
+def _insert(ch):
+    """The mixer insert a channel plays through (0 = straight to the master)."""
+    try:
+        return int(channels.getTargetFxTrack(ch))
+    except Exception:
+        return 0
+
+
 def _channel_info(ch):
-    info = {"index": ch, "name": str(channels.getChannelName(ch)), "plugin": _instrument(ch)}
+    info = {"index": ch, "name": str(channels.getChannelName(ch)), "plugin": _instrument(ch),
+            "insert": _insert(ch)}
     for key, read in (("color", channels.getChannelColor), ("volume", channels.getChannelVolume),
                       ("pan", channels.getChannelPan)):
         try:
@@ -434,6 +444,131 @@ def _param(plugins, ch, i, name):
     return row
 
 
+MIXER_SLOTS = 10
+
+
+def _slot_params(plugins, track, slot, find="", limit=PARAM_LIMIT):
+    """[(index, name)] of a mixer effect's named parameters (find: a part of the name)."""
+    out = []
+    for i in range(min(int(plugins.getParamCount(track, slot)), PARAM_SCAN)):
+        try:
+            name = str(plugins.getParamName(i, track, slot))
+        except Exception:
+            name = ""
+        if name.strip() and (not find or find in name.lower()):
+            out.append((i, name))
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _slot_param(plugins, track, slot, i, name):
+    row = [i, name, round(float(plugins.getParamValue(i, track, slot)), 6)]
+    try:
+        row.append(str(plugins.getParamValueString(i, track, slot))[:24])
+    except Exception:
+        pass
+    return row
+
+
+def _mixer(req):
+    """Mixer inserts: route a channel to one, select it, name it, read its effect
+    slots, and set or read an effect's parameters.
+
+    route: [channel, track]. routes: [[channel, track, insert name, color or None],
+    ...] routes several channels and names and colours their inserts.
+    names: N lists the names of inserts 1..N (for finding free ones).
+    select / track: the insert to look at (select also makes it the selected one).
+    slots: list the effect slots.
+    set: [[slot, parameter index or exact name, value 0..1], ...].
+    params: [slot, find, limit] lists an effect's parameters."""
+    import plugins
+    warnings, res = [], {"ok": True}
+    if req.get("route"):
+        ch, track = int(req["route"][0]), int(req["route"][1])
+        try:
+            channels.setTargetFxTrack(ch, track)
+        except Exception as e:
+            warnings.append("route: %s" % e)
+        res["routed"] = _insert(ch)
+    if req.get("routes"):
+        done = []
+        for ch, track, name, color in req["routes"]:
+            ch, track = int(ch), int(track)
+            try:
+                channels.setTargetFxTrack(ch, track)
+                if name:
+                    mixer.setTrackName(track, str(name)[:60])
+                if color is not None:
+                    mixer.setTrackColor(track, int(color))
+            except Exception as e:
+                warnings.append("channel %d to insert %d: %s" % (ch, track, e))
+            done.append([ch, _insert(ch), str(mixer.getTrackName(track))])
+        res["routes"] = done
+    if req.get("names"):
+        try:
+            last = min(int(req["names"]), int(mixer.trackCount()) - 1)
+            res["names"] = [str(mixer.getTrackName(t)) for t in range(1, last + 1)]
+        except Exception as e:
+            warnings.append("names: %s" % e)
+    track = req.get("track")
+    if track is not None:
+        track = int(track)
+        if req.get("select"):
+            try:
+                mixer.setTrackNumber(track)
+            except Exception as e:
+                warnings.append("select: %s" % e)
+        if req.get("name"):
+            try:
+                mixer.setTrackName(track, str(req["name"]))
+            except Exception as e:
+                warnings.append("name: %s" % e)
+        res["track"] = track
+        res["trackName"] = str(mixer.getTrackName(track))
+        res["selected"] = int(mixer.trackNumber())
+        if req.get("slots"):
+            slots = []
+            for s in range(MIXER_SLOTS):
+                try:
+                    if plugins.isValid(track, s):
+                        slots.append([s, str(plugins.getPluginName(track, s)),
+                                      int(plugins.getParamCount(track, s))])
+                except Exception as e:
+                    warnings.append("slot %d: %s" % (s, e))
+            res["slots"] = slots
+        done = []
+        for slot, key, value in (req.get("set") or []):
+            slot = int(slot)
+            try:
+                if isinstance(key, int):
+                    i = key
+                    name = str(plugins.getParamName(i, track, slot))
+                else:
+                    hits = [p for p in _slot_params(plugins, track, slot, limit=PARAM_SCAN)
+                            if p[1].strip().lower() == str(key).strip().lower()]
+                    if len(hits) != 1:
+                        warnings.append("no parameter %r in slot %d" % (key, slot))
+                        continue
+                    i, name = hits[0]
+                plugins.setParamValue(max(0.0, min(1.0, float(value))), i, track, slot)
+                done.append([slot] + _slot_param(plugins, track, slot, i, name))
+            except Exception as e:
+                warnings.append("%s not set: %s" % (key, e))
+        if done:
+            res["set"] = done
+        if req.get("params"):
+            slot, find, limit = (list(req["params"]) + ["", PARAM_LIMIT])[:3]
+            try:
+                res["params"] = [_slot_param(plugins, track, int(slot), i, n)
+                                 for i, n in _slot_params(plugins, track, int(slot),
+                                                          str(find).lower(), int(limit))]
+            except Exception as e:
+                warnings.append("params: %s" % e)
+    res["warnings"] = warnings
+    return res
+
+
 def _plugin(req):
     """What can be tweaked on a channel's plugin; `set` and `presetStep` tweak it.
 
@@ -494,6 +629,75 @@ def _plugin(req):
             "changed": done, "unknown": unknown, "warnings": warnings}
 
 
+# ---- the playlist (song arrangement) ------------------------------------------
+
+SONG_WINDOWS = (0, 1, 3)    # mixer, channel rack, piano roll: they float over the playlist
+
+
+def _song(req):
+    """What the companion needs to place pattern clips in the playlist, which no
+    script call can do: it clicks them in, and steers by what this reports (the
+    hint bar tells the bar under the mouse, and where a clip landed).
+
+    Optional actions, done before the report: `undo` (steps back), `pattern`
+    (select it; `name` and `color` are given to it), `snap` (main snap), `hide` /
+    `show` (window numbers), `focus` (bring the playlist forward), `tool`
+    (playlist tool number), `songMode` (True = play the song, False = the
+    pattern), `hint` (put in the hint bar, so a stale hint is never read)."""
+    import playlist
+    warnings = []
+
+    def attempt(what, call):
+        try:
+            return call()
+        except Exception as e:
+            warnings.append("%s: %s" % (what, e))
+            return None
+
+    for _ in range(min(int(req.get("undo") or 0), 200)):
+        attempt("undo", general.undoUp)
+    if req.get("pattern"):
+        pat = int(req["pattern"])
+        attempt("pattern", lambda: patterns.jumpToPattern(pat))
+        if req.get("name"):
+            attempt("name", lambda: patterns.setPatternName(pat, str(req["name"])[:60]))
+        if req.get("color") is not None:
+            attempt("color", lambda: patterns.setPatternColor(pat, int(req["color"])))
+    if req.get("snap") is not None:
+        attempt("snap", lambda: ui.setSnapMode(int(req["snap"])))
+    for w in req.get("hide") or []:
+        attempt("hide", lambda: ui.hideWindow(int(w)))
+    for w in req.get("show") or []:
+        attempt("show", lambda: ui.showWindow(int(w)))
+    if req.get("focus"):
+        attempt("show", lambda: ui.showWindow(midi.widPlaylist))
+        attempt("focus", lambda: ui.setFocused(midi.widPlaylist))
+    if req.get("tool") is not None:
+        attempt("tool", lambda: playlist.selectTool(int(req["tool"])))
+    if req.get("songMode") is not None:
+        if bool(attempt("mode", transport.getLoopMode)) != bool(req["songMode"]):
+            attempt("mode", transport.setLoopMode)
+    if req.get("hint") is not None:
+        attempt("hint", lambda: ui.setHintMsg(str(req["hint"])))
+
+    res = {"ok": True, "warnings": warnings}
+    for key, read in (
+            ("hint", lambda: str(ui.getHintMsg())[:120]),
+            ("songTicks", lambda: int(transport.getSongLength(midi.SONGLENGTH_ABSTICKS))),
+            ("ppq", lambda: int(general.getRecPPQ())),
+            ("ticksPerBar", lambda: int(general.getRecPPB())),
+            ("songMode", lambda: bool(transport.getLoopMode())),
+            ("visible", lambda: [w for w in SONG_WINDOWS if ui.getVisible(w)]),
+            ("playlistVisible", lambda: bool(ui.getVisible(midi.widPlaylist))),
+            ("lengths", lambda: [_pattern_steps(int(p)) for p in req.get("lengths") or []]),
+            ("tracks", lambda: [str(playlist.getTrackName(i)) for i in range(
+                1, 1 + min(int(req.get("tracks") or 0), int(playlist.trackCount())))])):
+        value = attempt(key, read)
+        if value is not None:
+            res[key] = value
+    return res
+
+
 def _handle(req):
     global _last_beat
     try:
@@ -511,6 +715,10 @@ def _handle(req):
             res = _set_channel(req)
         elif cmd == "plugin":
             res = _plugin(req)
+        elif cmd == "song":
+            res = _song(req)
+        elif cmd == "mixer":
+            res = _mixer(req)
         elif cmd == "read":     # look, don't touch: used to check what FL stored
             bits, vel, pitch = _read_track(int(req["channel"]), SCAN_STEPS)
             res = {"ok": True, "bits": bits, "vel": vel, "pitch": pitch}

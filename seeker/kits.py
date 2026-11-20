@@ -266,3 +266,51 @@ def fallback_ok(genre, role, style):
     """May a channel of another style stand in (when the rack isn't being built)?
     Always, except machines and synths under an acoustic genre."""
     return not (_GENRES[genre]["acoustic"] and style in ELECTRONIC[_group(role)])
+
+
+# ---- EQ starting points (CFilteR-01 on each channel's mixer insert) --------------
+# Bands in real units: shape, freq (Hz), gain (dB), q, slope (dB/oct). Every part
+# gets a low cut under its own range so the low end belongs to the kick and the
+# bass; a genre adds the cuts and lifts that make its parts fit together. These
+# are starting points chosen from how the instruments sit, not by ear: the user
+# tunes them. `eq_for(genre, role)` falls back on DEFAULT_EQ.
+def _cut(freq, slope=12):
+    return {"shape": "low cut", "freq": freq, "slope": slope}
+
+
+def _bell(freq, gain, q=1.0):
+    return {"shape": "bell", "freq": freq, "gain": gain, "q": q}
+
+
+DEFAULT_EQ = {
+    "kick": [_cut(30)],
+    "snare": [_cut(100)],
+    "clap": [_cut(150)],
+    "hat": [_cut(300, 18)],
+    "openhat": [_cut(300, 18)],
+    "perc": [_cut(150)],
+    "bass": [_cut(30)],
+    "chords": [_cut(120)],
+    "pad": [_cut(150)],
+    "guitar": [_cut(90)],
+}
+
+GENRE_EQ = {
+    # A trio: the kick's body (60-70 Hz) and the upright's fundamentals (41-131 Hz)
+    # share the bottom, so the bass steps aside at the kick's note; the Rhodes'
+    # rootless voicings (147-330 Hz) leave the roots to the bass; the ride loses
+    # its low wash and some ping.
+    "jazz": {
+        "kick": [_cut(30), _bell(65, 2.0, 1.0), _bell(350, -3.0, 1.4)],
+        "bass": [_cut(38), _bell(65, -2.0, 1.2), _bell(800, 1.5, 1.0)],
+        "chords": [_cut(140), _bell(320, -2.0, 1.0)],
+        "hat": [_cut(300, 18), _bell(4000, -2.5, 1.2)],
+        "snare": [_cut(120), _bell(500, -1.5, 1.2)],
+        "perc": [_cut(200)],
+    },
+}
+
+
+def eq_for(genre, role):
+    """The starting EQ bands for a part in a genre, or [] when there are none."""
+    return list(GENRE_EQ.get(genre, {}).get(role) or DEFAULT_EQ.get(role) or [])

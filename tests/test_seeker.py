@@ -321,6 +321,16 @@ class FakeRack:
         self.presets = ["Init", "Warm Pad", "Glass Keys", "Sub Bass", "Glass Bell"]
         self.hint = ""      # FL's hint bar
         self.props = {}     # channel -> {"color" / "volume" / "pan" / "editor": value}
+        self.clips = []     # playlist: (track, pattern, start tick), in the order placed
+        self.song_mode = False
+        self.windows = {0: False, 1: True}      # mixer hidden, channel rack showing
+        self.pattern_names = {}
+        self.pattern_colors = {}
+        self.inserts = {}       # channel -> mixer insert (missing = 0, the master)
+        self.insert_names = {}  # insert -> name the user or the script gave it
+        self.insert_colors = {}
+        self.mixer_selected = 0
+        self.fx = {}            # (insert, slot) -> {"name", "params": [[name, value]]}
 
 
 class Event:
@@ -358,6 +368,12 @@ def load_script(rack):
         # FL 2026 reports steps here, whatever the manual says about beats.
         return max(rack.length_beats.get(pat, 0) * 4, -(-last // 16) * 16)
 
+    rack.pattern_steps = pat_len
+
+    def song_length(mode):
+        ends = [start + pat_len(p) * 24 for _, p, start in rack.clips]
+        return max(ends) - 1 if ends else 0
+
     def prop(ch):
         return rack.props.setdefault(ch, {}).__setitem__
 
@@ -372,13 +388,25 @@ def load_script(rack):
     def set_param(value, i, ch):
         rack.plugins[ch]["params"][i][1] = value
 
-    mod("plugins", isValid=lambda ch: ch in rack.plugins,
-        getPluginName=lambda ch: rack.plugins[ch]["name"],
-        getParamCount=lambda ch: len(rack.plugins[ch]["params"]),
-        getParamName=lambda i, ch: rack.plugins[ch]["params"][i][0],
-        getParamValue=lambda i, ch: rack.plugins[ch]["params"][i][1],
-        getParamValueString=lambda i, ch: "%d%%" % round(rack.plugins[ch]["params"][i][1] * 100),
-        setParamValue=set_param, nextPreset=step_preset(1), prevPreset=step_preset(-1),
+    def target(ch, slot):
+        """A channel's plugin, or (with a slot) the effect in a mixer insert's slot."""
+        return rack.plugins[ch] if slot is None else rack.fx[(ch, slot)]
+
+    def set_any(value, i, ch, slot=None):
+        if slot is None:
+            return set_param(value, i, ch)
+        rack.fx[(ch, slot)]["params"][i][1] = value
+
+    mod("plugins",
+        isValid=lambda ch, slot=None: (ch in rack.plugins if slot is None
+                                       else (ch, slot) in rack.fx),
+        getPluginName=lambda ch, slot=None: target(ch, slot)["name"],
+        getParamCount=lambda ch, slot=None: len(target(ch, slot)["params"]),
+        getParamName=lambda i, ch, slot=None: target(ch, slot)["params"][i][0],
+        getParamValue=lambda i, ch, slot=None: target(ch, slot)["params"][i][1],
+        getParamValueString=lambda i, ch, slot=None: "%d%%" % round(
+            target(ch, slot)["params"][i][1] * 100),
+        setParamValue=set_any, nextPreset=step_preset(1), prevPreset=step_preset(-1),
         getPresetCount=lambda ch: len(rack.presets),
         getName=lambda ch, slot, flag, i: rack.presets[i])
     mod("channels", channelCount=lambda: len(rack.names),
@@ -396,27 +424,53 @@ def load_script(rack):
         showEditor=lambda i, v: prop(i)("editor", v),
         getGridBit=lambda ch, s: (rack.pattern, ch, s) in rack.grid,
         setGridBit=set_bit, setStepParameterByIndex=set_vel,
-        getCurrentStepParam=get_param)
+        getCurrentStepParam=get_param,
+        getTargetFxTrack=lambda i: rack.inserts.get(i, 0),
+        setTargetFxTrack=rack.inserts.__setitem__)
     mod("patterns", patternNumber=lambda: rack.pattern, getPatternLength=pat_len,
-        getPatternName=lambda p: "Pattern %d" % p, setPatternName=lambda p, n: None,
+        getPatternName=lambda p: rack.pattern_names.get(p, "Pattern %d" % p),
+        setPatternName=rack.pattern_names.__setitem__,
+        setPatternColor=rack.pattern_colors.__setitem__,
+        jumpToPattern=lambda p: setattr(rack, "pattern", p),
         findFirstNextEmptyPat=new_pattern)
-    mod("mixer", getCurrentTempo=lambda: rack.tempo * 1000)
+    mod("playlist", trackCount=lambda: 500, getTrackName=lambda i: "Track %d" % i,
+        selectTool=lambda i: setattr(rack, "tool", i))
+    mod("mixer", getCurrentTempo=lambda: rack.tempo * 1000, trackCount=lambda: 127,
+        getTrackName=lambda t: rack.insert_names.get(t, "Master" if t == 0 else "Insert %d" % t),
+        setTrackName=rack.insert_names.__setitem__,
+        setTrackColor=rack.insert_colors.__setitem__,
+        trackNumber=lambda: rack.mixer_selected,
+        setTrackNumber=lambda t: setattr(rack, "mixer_selected", t))
     mod("general", safeToEdit=lambda: True, saveUndo=lambda *a: None,
+        getRecPPQ=lambda: 96, getRecPPB=lambda: 384,
+        undoUp=lambda: rack.clips and rack.clips.pop(),
         processRECEvent=lambda ev, val, flags: setattr(rack, "tempo", val / 1000.0))
     mod("midi", pVelocity=1, pPitch=0, widPianoRoll=3, FFNEP_DontPromptName=1, REC_Tempo=5, REC_Control=1,
-        REC_UpdateControl=2, UF_PR=2)
-    mod("transport", isPlaying=lambda: rack.playing, getLoopMode=lambda: 0,
+        REC_UpdateControl=2, UF_PR=2, widPlaylist=2, SONGLENGTH_ABSTICKS=2)
+    mod("transport", isPlaying=lambda: rack.playing, getLoopMode=lambda: int(rack.song_mode),
+        setLoopMode=lambda: setattr(rack, "song_mode", not rack.song_mode),
+        getSongLength=song_length,
         start=lambda: setattr(rack, "playing", True))
     mod("device", isAssigned=lambda: True, midiOutSysex=rack.sent.append)
     def show(w):
         rack.ui.append(("show", w))
-        rack.roll = rack.selected       # a hidden piano roll opens on the selection
+        if w == 3:
+            rack.roll = rack.selected       # a hidden piano roll opens on the selection
+        else:
+            rack.windows[w] = True
 
     def hide(w):
         rack.ui.append(("hide", w))
-        rack.roll = None
+        if w == 3:
+            rack.roll = None
+        else:
+            rack.windows[w] = False
 
-    mod("ui", showWindow=show, hideWindow=hide, getVisible=lambda w: rack.roll is not None,
+    def visible(w):
+        return rack.roll is not None if w == 3 else rack.windows.get(w, w == 2)
+
+    mod("ui", showWindow=show, hideWindow=hide, getVisible=visible,
+        setSnapMode=lambda v: setattr(rack, "snap", v), getFocused=lambda w: False,
         setFocused=lambda w: rack.ui.append(("focus", w)), getHintMsg=lambda: rack.hint,
         setHintMsg=lambda text: setattr(rack, "hint", text))
 

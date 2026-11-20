@@ -25,6 +25,29 @@ use the **pattern-seeker** MCP tools. Don't write MIDI files or scripts by hand.
 - "Go back", "undo", "I liked the last one" → call `back`.
 - Questions about the project (tempo, which channel is what) → call `fl_status`.
 
+## Making a whole song
+
+When the user wants a song, an arrangement, a structure ("verse chorus verse",
+"ABABCB") or patterns "in the playlist", use `new_song` or `arrange`.
+
+- "Make me a trap song", "turn this into a full song" -> `new_song` with the
+  genre, key and scale. `structure` is one letter per section: A = verse, B =
+  chorus, C = bridge. Default `ABABCB`, 8 bars each. Map words to letters:
+  "verse chorus verse chorus bridge chorus" -> `ABABCB`. Add `build=true` on an
+  empty rack.
+- Building it step by step ("make a pattern and put it in the playlist, now a
+  second one") -> `new_beat` with `new_pattern=true`, then `arrange` with that
+  pattern number. `arrange` continues where the song ends unless `start_bar`
+  is given.
+- "Put pattern 2 after it", "repeat the chorus" -> `arrange`.
+- "Undo", "take that out" straight after -> `back` removes the clips.
+
+Tell the user beforehand that FL comes to the front and the mouse moves for a
+few seconds. Afterwards reply with the structure, the bars each section covers
+and the chords of each section. FL is left in song mode and not playing.
+`arrange` can't see clips already on a track: on a project with content, ask
+which track is free or let it continue at the end.
+
 ## Building the rack
 
 Pattern Seeker can add channels and load sounds, so the user needs no template.
@@ -57,6 +80,25 @@ Pattern Seeker can add channels and load sounds, so the user needs no template.
   Parameters run from 0 to 1. Loading a preset by name works on FLEX; on
   plugins where it fails, step with `preset=1`.
 
+Every channel gets its own mixer insert, named and coloured after it, instead
+of summing into the master: `add_channel` and `build_rack` route what they add.
+On a rack whose channels still go to the master (`fl_status` shows `insert`
+0), call `route_channels`. It uses an insert already named like the channel
+(a template's labelled insert with an EQ on it) first, then insert N for rack
+index N (the first instrument after FL's Sampler gets insert 1), and never
+takes an insert that is in use or that the user named. Mention the inserts
+when listing channels.
+
+EQ runs on CFilteR-01, the user's own Pro-Q 4 clone, which their template has
+in slot 1 of mixer inserts 1-10. "EQ the mix", "make the parts fit" →
+`mix_eq` with the genre: starting points from `kits.GENRE_EQ` (else
+`DEFAULT_EQ`). "Cut the Rhodes below 150", "less boom on the bass" → `eq` for
+that channel, in Hz, dB and Q. Both read the bands back from the plugin:
+report what it shows. The starting points were not chosen by ear, so ask the
+user to listen. Pattern Seeker can't load a plugin into an insert (opening an
+effect from outside FL always lands on the master), so when CFilteR-01 is
+missing, ask the user to add it.
+
 After building, list the channels added and the sound in each, and relay any
 `problems`. The kit sounds were chosen from their names, not by ear, so invite
 the user to swap any they don't like.
@@ -78,5 +120,8 @@ MIDI settings, or that the Pattern Seeker window is open and holding the ports.
   Script output > Pattern Seeker In tab > Reload script.
 - Genre kits and channel styles live in `seeker/kits.py`; which channel plays which
   part is `mapping.fit_rack`; loading sounds into FL is `seeker/sounds.py`.
+- Placing clips in the playlist is `seeker/playlist.py`: mouse clicks steered and
+  checked by FL's hint bar (the `song` command of the FL script). The tests
+  drive it against `FakeScreen` in `tests/test_playlist.py`.
 - FL controller scripts (`fl_script/`) can't use file I/O, `ctypes` or `subprocess`.
   Everything crosses as SysEx (`seeker/wire.py`).
