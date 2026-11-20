@@ -31,6 +31,58 @@ class Library(unittest.TestCase):
                     self.assertFalse(set(v) - set("Xxo."), "%s/%s %r" % (key, role, v))
 
 
+    def test_bass_lines_and_chord_figures_use_known_symbols(self):
+        from seeker.library import CHORDS
+        for key, g in GENRES.items():
+            for line in g["bass"].get("lines", []):
+                self.assertIn(len(line), (16, 32), "%s %r" % (key, line))
+                self.assertFalse(set(line) - set("12345678abc."), "%s %r" % (key, line))
+            self.assertIn(key, CHORDS)
+            for r in CHORDS[key]["rhythm"]:
+                self.assertIn(len(r), (16, 32), "%s %r" % (key, r))
+                self.assertFalse(set(r) - set("x-.1234"), "%s %r" % (key, r))
+
+
+class NewGenres(unittest.TestCase):
+    def test_upper_degrees_climb_instead_of_dropping(self):
+        from seeker.generator import bass_pitches
+        # C major boogie: C E G A C' A G E
+        self.assertEqual(bass_pitches(list("1.3.a.b.8.b.a.3."), 0, "major")[::2],
+                         [60, 64, 67, 69, 72, 69, 67, 64])
+        self.assertEqual(bass_pitches(list("1...5..."), 0, "major")[::4], [60, 55])   # 5 = below
+        # over the IV chord the run keeps climbing (F A C D), it is not folded back
+        self.assertEqual(bass_pitches(list("1.3.a.b."), 0, "major", prog="4444")[::2],
+                         [65, 69, 72, 74])
+
+    def test_digits_in_a_chord_rhythm_break_the_chord(self):
+        from seeker.generator import chord_notes
+        notes = chord_notes("1-3-2-3-" * 2, "1111", 0, "major")     # Alberti on C major
+        self.assertEqual([(n, s, l) for n, s, l, _ in notes],
+                         [(55, 0, 2), (64, 2, 2), (60, 4, 2), (64, 6, 2)] * 1
+                         + [(55, 8, 2), (64, 10, 2), (60, 12, 2), (64, 14, 2)])
+        block = chord_notes("x-------", "11", 0, "major")
+        self.assertEqual(sorted(n for n, _, _, _ in block), [55, 60, 64])
+        mixed = chord_notes("1-..x-..", "11", 0, "major")           # bass note, then the chord
+        self.assertEqual([n for n, s, _, _ in mixed if s == 0], [55])
+        self.assertEqual(len([n for n, s, _, _ in mixed if s == 4]), 3)
+
+    def test_a_genre_without_drums_still_gives_fresh_named_beats(self):
+        from seeker.generator import Seeker
+        seeker = Seeker(seed=5)
+        beats = [seeker.next("classical") for _ in range(8)]
+        self.assertTrue(all(b.drumless and not any(b.lanes["kick"]) for b in beats))
+        self.assertTrue(all(any(b.lanes["bass"]) for b in beats))
+        progs = [b.chords["progs"]["major"] for b in beats]
+        self.assertEqual(len(set(progs)), 8)                # the harmony never repeats
+        self.assertGreater(len({b.name for b in beats}), 2)
+        self.assertFalse(seeker.next("jazz").drumless)
+
+    def test_swing_genres_stay_on_the_shuffle_grid(self):
+        for ride in GENRES["jazz"]["hat"]:
+            self.assertEqual(len(ride), 32)         # two bars: never run through _vary_hat
+            self.assertFalse([i for i, c in enumerate(ride) if c != "." and i % 4 in (1, 2)])
+
+
 class Generator(unittest.TestCase):
     def test_beats_are_two_bars_with_a_downbeat_kick(self):
         rng = random.Random(1)
@@ -38,7 +90,7 @@ class Generator(unittest.TestCase):
             for _ in range(50):
                 beat = generate(key, rng)
                 self.assertEqual({len(v) for v in beat.lanes.values()}, {STEPS})
-                self.assertTrue(beat.lanes["kick"][0])
+                self.assertTrue(beat.lanes["kick"][0] or beat.drumless)   # classical: no kit
                 lo, hi = GENRES[key]["bpm"]
                 self.assertTrue(lo <= beat.tempo <= hi)
 
@@ -87,11 +139,15 @@ class Generator(unittest.TestCase):
                             self.assertTrue(55 <= number < 67)
                             self.assertTrue(length > 0 and start + length <= CYCLE)
                             self.assertTrue(1 <= vel <= 127)
-                        # every strike is a full chord of 3 or 4 different notes
+                        # every strike is a full chord of 3 or 4 different notes, or
+                        # (where the rhythm has a digit) one note of a broken chord
                         starts = {}
                         for number, start, _, _ in notes:
                             starts.setdefault(start, set()).add(number)
-                        self.assertTrue(all(len(v) in (3, 4) for v in starts.values()))
+                        rhythm = beat.chords["rhythm"]
+                        for start, v in starts.items():
+                            self.assertIn(len(v), (1,) if rhythm[start].isdigit()
+                                          or (rhythm[start] == "-" and len(v) == 1) else (3, 4))
 
                         self.assertEqual(len(prog), 16)         # a root per beat, 4 bars
                         self.assertNotIn("7" if scale == "major" else "2", prog)
@@ -261,6 +317,10 @@ class FakeRack:
         self.ui = []        # window calls the script made
         self.selected = 0
         self.roll = None    # channel the piano roll shows; None = hidden
+        self.plugins = {}   # channel -> {"name", "params": [[name, value]], "preset": n}
+        self.presets = ["Init", "Warm Pad", "Glass Keys", "Sub Bass", "Glass Bell"]
+        self.hint = ""      # FL's hint bar
+        self.props = {}     # channel -> {"color" / "volume" / "pan" / "editor": value}
 
 
 class Event:
@@ -298,10 +358,42 @@ def load_script(rack):
         # FL 2026 reports steps here, whatever the manual says about beats.
         return max(rack.length_beats.get(pat, 0) * 4, -(-last // 16) * 16)
 
+    def prop(ch):
+        return rack.props.setdefault(ch, {}).__setitem__
+
+    def step_preset(by):
+        def step(ch):       # like FL: wraps round, and the hint bar names the preset
+            at = (rack.plugins[ch].get("preset", 0) + by) % len(rack.presets)
+            rack.plugins[ch]["preset"] = at
+            rack.plugins[ch].setdefault("steps", []).append(by)
+            rack.hint = rack.presets[at]
+        return step
+
+    def set_param(value, i, ch):
+        rack.plugins[ch]["params"][i][1] = value
+
+    mod("plugins", isValid=lambda ch: ch in rack.plugins,
+        getPluginName=lambda ch: rack.plugins[ch]["name"],
+        getParamCount=lambda ch: len(rack.plugins[ch]["params"]),
+        getParamName=lambda i, ch: rack.plugins[ch]["params"][i][0],
+        getParamValue=lambda i, ch: rack.plugins[ch]["params"][i][1],
+        getParamValueString=lambda i, ch: "%d%%" % round(rack.plugins[ch]["params"][i][1] * 100),
+        setParamValue=set_param, nextPreset=step_preset(1), prevPreset=step_preset(-1),
+        getPresetCount=lambda ch: len(rack.presets),
+        getName=lambda ch, slot, flag, i: rack.presets[i])
     mod("channels", channelCount=lambda: len(rack.names),
         selectOneChannel=lambda i: setattr(rack, "selected", i),
         selectedChannel=lambda: rack.selected,
-        getChannelName=lambda i: rack.names[i], getChannelType=lambda i: 0,
+        getChannelName=lambda i: rack.names[i],
+        getChannelType=lambda i: 2 if i in rack.plugins else 0,
+        setChannelName=lambda i, n: rack.names.__setitem__(i, n),
+        setChannelColor=lambda i, c: prop(i)("color", c),
+        setChannelVolume=lambda i, v: prop(i)("volume", v),
+        setChannelPan=lambda i, v: prop(i)("pan", v),
+        getChannelColor=lambda i: rack.props.get(i, {}).get("color", 0x565148),
+        getChannelVolume=lambda i: rack.props.get(i, {}).get("volume", 0.78125),
+        getChannelPan=lambda i: rack.props.get(i, {}).get("pan", 0.0),
+        showEditor=lambda i, v: prop(i)("editor", v),
         getGridBit=lambda ch, s: (rack.pattern, ch, s) in rack.grid,
         setGridBit=set_bit, setStepParameterByIndex=set_vel,
         getCurrentStepParam=get_param)
@@ -325,7 +417,8 @@ def load_script(rack):
         rack.roll = None
 
     mod("ui", showWindow=show, hideWindow=hide, getVisible=lambda w: rack.roll is not None,
-        setFocused=lambda w: rack.ui.append(("focus", w)))
+        setFocused=lambda w: rack.ui.append(("focus", w)), getHintMsg=lambda: rack.hint,
+        setHintMsg=lambda text: setattr(rack, "hint", text))
 
     spec = importlib.util.spec_from_file_location(
         "ps_script", os.path.join(ROOT, "fl_script", "device_PatternSeeker.py"))

@@ -1,6 +1,12 @@
-"""Decide which channel-rack channel plays which drum role, by channel name."""
+"""Decide which channel-rack channel plays which part, by channel name.
+
+detect_role says what a channel is (a kick, a bass, keys ...). fit_rack then
+picks, for a genre, the one channel per part whose sound suits it (kits.py).
+"""
 
 import re
+
+from seeker import kits
 
 _W = r"(?:^|[^a-z])"
 _E = r"(?:[^a-z]|$)"
@@ -8,16 +14,18 @@ _E = r"(?:[^a-z]|$)"
 # Order matters: "Open Hat" must be claimed before the generic hat rule sees it.
 _RULES = [
     ("openhat", r"open|" + _W + r"(?:oh|ohh|ophat)" + _E),
-    ("hat", r"hat|" + _W + r"(?:hh|chh)" + _E),
+    ("hat", r"hat|" + _W + r"(?:hh|chh|ride)" + _E),      # jazz keeps time on the ride
     ("kick", r"kick|kik|bass ?drum|" + _W + r"(?:bd|kck)" + _E),
     ("snare", r"snare|snr|" + _W + r"(?:sd|sn)" + _E),
     ("clap", r"clap|clp|snap"),
     ("perc", r"perc|rim|shaker|shk|conga|bongo|cowbell|clave|tamb|stick|block|"
              r"triangle|cabasa|maraca|guiro|" + _W + r"toms?" + _E),
     # Chords go to the piano roll of this channel, never its step sequencer.
-    ("chords", r"keys|piano|chord|rhodes|organ|wurli"),
+    ("chords", r"keys|piano|chord|rhodes|organ|wurli|harpsichord"),
     # Last, so "808 Kick" / "Bass Drum" stay drums and only a bare 808 is the bass.
-    ("bass", r"808|bass|reese|log ?drum|" + _W + r"sub" + _E),
+    ("bass", r"808|bass|reese|log ?drum|cello|upright|" + _W + r"sub" + _E),
+    # After the bass, so a "Bass Guitar" stays a bass.
+    ("guitar", r"guitar|gtr|" + _W + r"(?:tele|strat)" + _E),
     # After the bass, so a "Synth Bass" stays a bass. Also piano roll only.
     ("pad", r"synth|pad|string|ambien|atmos|choir"),
 ]
@@ -64,6 +72,55 @@ def map_rack(channels):
     return out
 
 
+def fit_rack(channels, genre, strict=False):
+    """The channels a beat of `genre` is written to: ({role: channel}, idle).
+
+    Per part, in order of preference: a channel whose style the genre accepts
+    ("Rock Kick" for rock), then a plainly named one ("Kick"), then - unless
+    `strict`, which is how a rack is built - one of another style, as long as
+    it isn't a machine or a synth under an acoustic genre (kits.fallback_ok).
+    A part the genre doesn't have gets no channel.
+
+    `idle` are the step-sequencer channels of other kits: recognised drums and
+    basses that sit this beat out and must be silenced in its pattern.
+    """
+    accepts = kits.accepts(genre)
+    by_role, used = {}, set()
+    for ch in channels:
+        role = detect_role(ch["name"])
+        if role:
+            by_role.setdefault(role, []).append(ch)
+            used.add(ch["index"])
+    out, idle = {}, []
+    for role, found in by_role.items():
+        styled = [(ch, kits.style_of(role, ch["name"])) for ch in found]
+        plain = [ch for ch, style in styled if style is None][:1]
+        pick = None
+        if role in accepts:
+            fits = [ch for ch, style in styled if style in accepts[role]]
+            other = [] if strict else [ch for ch, style in styled if style is not None
+                                       and kits.fallback_ok(genre, role, style)]
+            pick = (fits + plain + other + [None])[0]
+        if pick:
+            out[role] = pick
+        if role in kits.STEP_ROLES:
+            idle += [ch for ch, style in styled
+                     if ch is not pick and (style is not None or ch in plain)]
+    if not strict:
+        # Instruments named after their preset ("default", "Padilion") say nothing:
+        # try their plugin ("FL Keys" plays the chords), then plain rack order.
+        spare = [ch for ch in channels if ch["index"] not in used and ch.get("plugin")]
+        for ch in list(spare):
+            role = detect_role(ch["plugin"])
+            if role in INSTRUMENTS and role in accepts and role not in out:
+                out[role] = ch
+                spare.remove(ch)
+        for role in INSTRUMENTS:
+            if role in accepts and role not in out and spare:
+                out[role] = spare.pop(0)
+    return out, idle
+
+
 def _merge(a, b):
     return [max(x, y) for x, y in zip(a, b)]
 
@@ -80,7 +137,7 @@ def build_tracks(lanes, rolemap, pitches=None):
     steps = len(next(iter(lanes.values())))
     silent = [0] * steps
     rolemap = {r: ch for r, ch in rolemap.items()
-               if r not in ("chords", "pad") and (r != "bass" or "bass" in lanes)}
+               if r in kits.STEP_ROLES and (r != "bass" or "bass" in lanes)}
     play = {role: list(lanes.get(role, silent)) for role in rolemap}
 
     if "snare" in rolemap and "clap" not in rolemap:

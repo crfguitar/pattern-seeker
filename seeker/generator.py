@@ -4,7 +4,7 @@ over a four-bar cycle of chords and pad."""
 import random
 import zlib
 
-from .library import CHORDS, GENRES, PACES, PROGRESSIONS, ROLES, TURNAROUNDS
+from .library import CHORDS, GENRES, GUITAR, PACES, PROGRESSIONS, ROLES, TURNAROUNDS
 
 BARS = 2
 STEPS = 16 * BARS
@@ -23,9 +23,11 @@ class Beat:
         self.degrees = ["."] * STEPS  # 808 lane: scale degree per step
         self.relative = ["."] * STEPS  # 808 lane written against the chords
         self.chords = None            # {'rhythm', 'voicing', 'progs': {scale: prog}}
+        self.guitar = None            # {'rhythm', 'voicing', 'base'} in genres with a guitar
         sig = "|".join("%s:%s" % (r, "".join("1" if v else "0" for v in lanes[r]))
                        for r in ROLES)
         self.signature = sig
+        self.drumless = not any(any(lanes[r]) for r in ROLES)
         self.tag = "%04X" % (zlib.crc32(sig.encode()) & 0xFFFF)
         self.name = "Seek %s %s" % (self.genre_name, self.tag)
 
@@ -119,6 +121,7 @@ def _bass(spec, kick, rng):
 
 
 PASSING = "o"     # in a progression: a passing diminished chord (see add_passing)
+UPPER = "abc"     # in a bass line: the fifth, sixth and seventh ABOVE the root
 
 
 def _target(prog):
@@ -186,20 +189,33 @@ def bass_pitches(degrees, key=0, scale="minor", base=60, prog=None):
             continue
         p = int(ch)
         chord = steps[p - 1] - (12 if p >= 5 else 0)       # chord root vs key root
+        up = d in UPPER                 # a b c: the fifth, sixth, seventh above
         if d == "8":
             move = 12
         else:
-            n = int(d)
+            n = UPPER.index(d) + 5 if up else int(d)
             idx = p - 1 + n - 1
             move = steps[idx % 7] + 12 * (idx // 7) - steps[p - 1]
-            if n >= 5:
+            if n >= 5 and not up:
                 move -= 12
         total = chord + move
         if total < -7:
             total += 12
-        elif total > 12:
+        elif total > 12 and not up:     # a climbing line is not folded back mid-run
             total -= 12
         out.append(root + total)
+    return out
+
+
+def in_register(pitches, low, high):
+    """Move each note by octaves until it lies within low..high (a real bass's range)."""
+    out = []
+    for p in pitches:
+        while p > high:
+            p -= 12
+        while p < low:
+            p += 12
+        out.append(p)
     return out
 
 
@@ -210,23 +226,35 @@ def chord_notes(rhythm, prog, key=0, scale="minor", voicing="triad", base=60):
     """Piano-roll notes for a chord lane: [(midi note, start step, length, velocity)].
 
     Every chord tone is folded into the same one-octave window around `base`,
-    which gives close voicings that move smoothly from chord to chord.
+    which gives close voicings that move smoothly from chord to chord. A digit in
+    the rhythm plays one note of that voicing (1 = the lowest): broken chords.
     """
     low = base - 5
     notes, start, current, vel = [], None, "", 96
+    only = None         # a digit in the rhythm: just that note of the chord
 
     def voiced(ch):
+        if voicing == "power":      # root, fifth, octave: no third to muddy the distortion
+            root, _, fifth = chord_pcs(ch, prog, key, scale)
+            bottom = low + (root - low) % 12
+            return [bottom, bottom + (fifth - root) % 12, bottom + 12]
         return sorted({low + (pc - low) % 12
                        for pc in chord_pcs(ch, prog, key, scale, VOICINGS[voicing])})
 
     def close(end):
         if start is not None and end > start:
-            notes.extend((n, start, end - start, vel) for n in voiced(current))
+            tones = voiced(current)
+            if only is not None:
+                tones = [tones[only % len(tones)]]
+            notes.extend((n, start, end - start, vel) for n in tones)
 
     for i, c in enumerate(rhythm):
         degree = prog[(i // 4) % len(prog)]
-        if c == "x" or (c == "-" and start is not None and i % 4 == 0 and degree != current):
+        if c == "x" or c.isdigit() \
+                or (c == "-" and start is not None and i % 4 == 0 and degree != current):
             close(i)
+            if c != "-":
+                only = int(c) - 1 if c.isdigit() else None
             start, current, vel = i, degree, (96 if i % 4 == 0 else 84)
         elif c == ".":
             close(i)
@@ -289,6 +317,17 @@ def generate(genre, rng=None):
     rhythm, pace = rng.choice(c["rhythm"]), rng.choice(c["pace"])
     beat.chords = {"rhythm": (rhythm * (CYCLE // len(rhythm)))[:CYCLE], "voicing": c["voicing"],
                    "progs": {s: progression(s, pace, rng) for s in SCALES}}
+    if genre in GUITAR:
+        g = GUITAR[genre]
+        strum = rng.choice(g["rhythm"])
+        beat.guitar = {"rhythm": (strum * (CYCLE // len(strum)))[:CYCLE],
+                       "voicing": g["voicing"], "base": g["base"]}
+    if beat.drumless:
+        # No drums to tell two beats apart (classical): the bass line and the
+        # chord figure name it instead.
+        figure = "".join(degrees) + rhythm
+        beat.tag = "%04X" % (zlib.crc32(figure.encode()) & 0xFFFF)
+        beat.name = "Seek %s %s" % (beat.genre_name, beat.tag)
     return beat
 
 
@@ -313,7 +352,9 @@ class Seeker:
             beat = generate(key, self.rng)
             progs = tuple(sorted(beat.chords["progs"].items()))
             # Fresh drums AND fresh harmony: never the chords of the last few beats.
-            if beat.signature not in self.recent and progs not in self.recent_progs:
+            # (A genre without drums has only its harmony to keep fresh.)
+            if (beat.drumless or beat.signature not in self.recent) \
+                    and progs not in self.recent_progs:
                 break
         self.recent.append(beat.signature)
         self.recent_progs.append(progs)

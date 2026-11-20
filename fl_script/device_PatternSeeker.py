@@ -22,7 +22,7 @@ Packet layout (mirrored in seeker/wire.py):
 FL rules that matter here: no threads, and nothing may raise out of a callback.
 """
 
-SCRIPT_VERSION = 7
+SCRIPT_VERSION = 13
 
 _ok = False
 _err = ""
@@ -51,6 +51,11 @@ CT_GEN_PLUG = 2          # channels.getChannelType: a generator plugin
 HW_DIRTY_EDIT = 0x20000  # OnRefresh flag FL 2026 sends when a script's edit lands (seen live)
 DEFAULT_VELOCITY = 100
 DEFAULT_PITCH = 60     # C5: a sampler channel plays its sample untransposed
+PARAM_SCAN = 5000      # a VST shows 4240 parameter slots, most of them unnamed
+PARAM_LIMIT = 120      # parameters listed per answer
+FPN_PRESET = 6         # plugins.getName flag: the name of preset number N
+PRESET_LIMIT = 400
+HINT_MARK = "Pattern Seeker..."    # put in FL's hint bar before a preset step
 
 MAGIC = b"\xF0\x7D\x50\x53"
 K_REQUEST, K_RESPONSE, K_HEARTBEAT = 1, 2, 3
@@ -336,6 +341,159 @@ def _close_piano_roll():
         ui.showWindow(midi.widPianoRoll)
 
 
+# ---- channels and their plugins (name, colour, level, parameters, presets) ----
+
+def _named(req):
+    """The rack index a request means, or None when the rack changed under it."""
+    ch = int(req["channel"])
+    if (ch < 0 or ch >= int(channels.channelCount())
+            or str(channels.getChannelName(ch)) != req.get("name")):
+        return None
+    return ch
+
+
+def _channel_info(ch):
+    info = {"index": ch, "name": str(channels.getChannelName(ch)), "plugin": _instrument(ch)}
+    for key, read in (("color", channels.getChannelColor), ("volume", channels.getChannelVolume),
+                      ("pan", channels.getChannelPan)):
+        try:
+            v = read(ch)
+            info[key] = (int(v) & 0xFFFFFF) if key == "color" else round(float(v), 4)
+        except Exception:
+            pass
+    return info
+
+
+def _set_channel(req):
+    """Rename, recolour, set level and pan, show or hide the plugin window."""
+    ch = _named(req)
+    if ch is None:
+        return {"ok": False, "error": "rack_changed"}
+    warnings = []
+    change = req.get("set") or {}
+    for key, write in (("color", lambda v: channels.setChannelColor(ch, int(v))),
+                       ("volume", lambda v: channels.setChannelVolume(ch, float(v))),
+                       ("pan", lambda v: channels.setChannelPan(ch, float(v))),
+                       ("name", lambda v: channels.setChannelName(ch, str(v)[:60]))):
+        if change.get(key) is not None:
+            try:
+                write(change[key])
+            except Exception as e:
+                warnings.append("%s not set: %s" % (key, e))
+    if req.get("editor") is not None:
+        try:
+            channels.showEditor(ch, 1 if req["editor"] else 0)
+        except Exception as e:
+            warnings.append("plugin window: %s" % e)
+    return {"ok": True, "channel": _channel_info(ch), "warnings": warnings}
+
+
+def _preset_names(plugins, ch):
+    """The plugin's presets, in order. FL has no call for WHICH one is loaded."""
+    try:
+        flag = getattr(midi, "FPN_Preset", FPN_PRESET)
+        return [str(plugins.getName(ch, -1, flag, i))
+                for i in range(min(int(plugins.getPresetCount(ch)), PRESET_LIMIT))]
+    except Exception:
+        return []
+
+
+def _preset_shown(names):
+    """Index of the preset FL loaded last, or -1. FL has no call for it, but a
+    moment after a preset step its hint bar shows that preset's name (seen live).
+    The hint is blanked before each step, so an older name is never mistaken."""
+    try:
+        hint = str(ui.getHintMsg()).strip()
+        hits = [i for i, n in enumerate(names) if n.strip() == hint]
+        return hits[0] if len(hits) == 1 else -1
+    except Exception:
+        return -1
+
+
+def _param_names(plugins, ch):
+    """[(index, name)] of the parameters that have a name."""
+    out = []
+    for i in range(min(int(plugins.getParamCount(ch)), PARAM_SCAN)):
+        try:
+            name = str(plugins.getParamName(i, ch))
+        except Exception:
+            name = ""
+        if name.strip():
+            out.append((i, name))
+    return out
+
+
+def _param(plugins, ch, i, name):
+    row = [i, name, round(float(plugins.getParamValue(i, ch)), 4)]
+    try:
+        text = str(plugins.getParamValueString(i, ch))
+        if text:
+            row.append(text[:24])
+    except Exception:
+        pass
+    return row
+
+
+def _plugin(req):
+    """What can be tweaked on a channel's plugin; `set` and `presetStep` tweak it.
+
+    set: [[parameter index or name, value 0..1], ...]. A name matches exactly, or
+    as the only parameter containing it; the rest come back in `unknown`."""
+    ch = _named(req)
+    if ch is None:
+        return {"ok": False, "error": "rack_changed"}
+    import plugins
+    if int(channels.getChannelType(ch)) != CT_GEN_PLUG or not plugins.isValid(ch):
+        return {"ok": False, "error": "no_plugin"}
+    warnings, unknown, done = [], [], []
+    step = int(req.get("presetStep") or 0)
+    presets = _preset_names(plugins, ch)
+    try:
+        if step:
+            ui.setHintMsg(HINT_MARK)
+        for _ in range(min(abs(step), PRESET_LIMIT)):
+            (plugins.nextPreset if step > 0 else plugins.prevPreset)(ch)
+    except Exception as e:
+        warnings.append("preset not changed: %s" % e)
+    at = _preset_shown(presets) if req.get("presetAt") else -1
+    names = _param_names(plugins, ch)
+    by_index = dict(names)
+    for key, value in (req.get("set") or []):
+        if isinstance(key, int):
+            hits = [key] if key in by_index else []
+        else:
+            want = str(key).strip().lower()
+            hits = ([i for i, n in names if n.strip().lower() == want]
+                    or [i for i, n in names if want in n.lower()])
+        if len(hits) != 1:
+            unknown.append(key)
+            continue
+        try:
+            plugins.setParamValue(max(0.0, min(1.0, float(value))), hits[0], ch)
+            done.append(_param(plugins, ch, hits[0], by_index[hits[0]]))
+        except Exception as e:
+            warnings.append("%s not set: %s" % (by_index[hits[0]], e))
+    find = str(req.get("find") or "").strip().lower()
+    listed = [(i, n) for i, n in names if not find or find in n.lower()]
+    limit = max(0, min(int(req.get("limit", PARAM_LIMIT)), PARAM_LIMIT))
+    if done or step:
+        try:
+            general.saveUndo("Pattern Seeker tweak", midi.UF_PR)
+        except Exception:
+            pass
+    res = {"presetCount": len(presets)}
+    if 0 <= at < len(presets):
+        res["preset"], res["presetIndex"] = presets[at], at
+    if req.get("presets"):
+        res["presets"] = presets
+    if req.get("presetAt"):
+        res["hint"] = str(ui.getHintMsg())[:80]
+    return {"ok": True, "channel": _channel_info(ch), "presets": res,
+            "paramCount": len(names), "matching": len(listed),
+            "params": [_param(plugins, ch, i, n) for i, n in listed[:limit]],
+            "changed": done, "unknown": unknown, "warnings": warnings}
+
+
 def _handle(req):
     global _last_beat
     try:
@@ -349,6 +507,10 @@ def _handle(req):
         elif cmd == "closePianoRoll":
             _close_piano_roll()
             res = {"ok": True}
+        elif cmd == "channel":
+            res = _set_channel(req)
+        elif cmd == "plugin":
+            res = _plugin(req)
         elif cmd == "read":     # look, don't touch: used to check what FL stored
             bits, vel, pitch = _read_track(int(req["channel"]), SCAN_STEPS)
             res = {"ok": True, "bits": bits, "vel": vel, "pitch": pitch}

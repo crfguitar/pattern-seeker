@@ -34,7 +34,7 @@ Replaces the notes of colour %(color)d in this piano roll with the current chord
 import flpianoroll as flp
 
 COLOR = %(color)d
-NOTES = %(notes)s    # (note, start step, length in steps, velocity 0-127)
+NOTES = %(notes)s    # (note, start step, length in steps, velocity 0-127); steps may be fractional
 
 for _i in range(flp.score.noteCount - 1, -1, -1):
     if flp.score.getNote(_i).color == COLOR:
@@ -64,9 +64,15 @@ def tile(notes, total_steps, unit=64):
     return out
 
 
+def _num(x):
+    """A step position: whole steps print as ints, off-grid ones keep 4 decimals."""
+    x = round(float(x), 4)
+    return "%d" % x if x == int(x) else repr(x)
+
+
 def script_source(notes):
-    body = "[\n%s]" % "".join("    (%d, %d, %d, %d),\n" % tuple(n) for n in notes) \
-        if notes else "[]"
+    body = "[\n%s]" % "".join("    (%d, %s, %s, %d),\n" % (n[0], _num(n[1]), _num(n[2]), n[3])
+                               for n in notes) if notes else "[]"
     return _TEMPLATE % {"name": SCRIPT_NAME, "color": NOTE_COLOR, "notes": body}
 
 
@@ -171,8 +177,11 @@ def press_run_last_script():
     _press(VK_CONTROL, VK_MENU, VK_Y)
 
 
-def _fl_script_folder(hwnd):
-    """The scripts that ship with the FL Studio that owns `hwnd`."""
+MAIN_CLASS = "TFruityLoopsMainForm"
+
+
+def _exe_of(hwnd):
+    """Full path of the program that owns `hwnd`, or None."""
     pid = wintypes.DWORD()
     _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     handle = _kernel32.OpenProcess(0x1000, False, pid)     # QUERY_LIMITED_INFORMATION
@@ -184,7 +193,22 @@ def _fl_script_folder(hwnd):
             return None
     finally:
         _kernel32.CloseHandle(handle)
-    return os.path.join(os.path.dirname(buf.value), "System", "Config", "Piano roll scripts")
+    return buf.value
+
+
+def fl_exe():
+    """The FL Studio program that is running (its main window's owner), or None."""
+    for hwnd in _windows(MAIN_CLASS):
+        exe = _exe_of(hwnd)
+        if exe:
+            return exe
+    return None
+
+
+def _fl_script_folder(hwnd):
+    """The scripts that ship with the FL Studio that owns `hwnd`."""
+    exe = _exe_of(hwnd)
+    return os.path.join(os.path.dirname(exe), "System", "Config", "Piano roll scripts")         if exe else None
 
 
 def menu_position(folders, name=SCRIPT_NAME):
