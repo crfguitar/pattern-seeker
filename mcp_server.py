@@ -38,7 +38,9 @@ mcp = FastMCP(
         "add_channel loads one into a new channel, channel_params and set_channel "
         "shape it. build_rack (or new_beat with build=true) does all of that for a "
         "genre in one call. Name new channels Kick, Snare, Clap, Hat, 808, Piano or Pad so "
-        "new_beat knows what to write on them."),
+        "new_beat knows what to write on them. For a whole song rather than a loop, "
+        "new_song writes a pattern per section (verse, chorus, bridge) and lays them out "
+        "in the playlist; arrange lays out patterns that already exist."),
 )
 engine = Engine()
 
@@ -70,7 +72,8 @@ def new_beat(genre: str = "auto", key: str = "C", scale: str = "minor",
              bass: bool = True, chords: bool = True, pad: bool = True,
              play: bool = True, set_tempo: bool = False,
              new_pattern: bool = False, tempo: float | None = None,
-             passing: bool = False, build: bool = False, guitar: bool = True) -> dict:
+             passing: bool = False, build: bool = False, guitar: bool = True,
+             drums: bool = True) -> dict:
     """Write a fresh beat onto FL Studio's current pattern (or a new one).
 
     genre: a name from list_genres, or 'auto' to pick one that fits the project tempo.
@@ -78,6 +81,7 @@ def new_beat(genre: str = "auto", key: str = "C", scale: str = "minor",
     bass / chords / pad / guitar: write the bass line, the keys chords, the pad,
       the guitar (rock: power chords; country: picking; other genres have none).
       A part that is off leaves its channel exactly as it was.
+    drums: false writes no drums (a breakdown) and empties the drum channels.
     play: start FL's transport. set_tempo: change FL's tempo to suit the genre.
     tempo: an exact BPM (e.g. 90) to set FL to; use it whenever the user names a
       tempo. With genre 'auto' it also picks a genre that fits that tempo.
@@ -100,7 +104,7 @@ def new_beat(genre: str = "auto", key: str = "C", scale: str = "minor",
     try:
         return dict(ok=True, **engine.new_beat(genre, key, scale, bass, chords, pad,
                                                play, set_tempo, new_pattern, tempo,
-                                               passing, build, guitar))
+                                               passing, build, guitar, drums))
     except SeekerError as e:
         return _fail(e)
 
@@ -121,6 +125,32 @@ def write_part(channel: int | str, notes: list[list[float]]) -> dict:
     and lastBeat (key, chords) so the part fits the beat."""
     try:
         return dict(ok=True, **engine.write_part(channel, notes))
+    except SeekerError as e:
+        return _fail(e)
+
+
+@mcp.tool()
+def write_song(sections: list[dict], tempo: float | None = None, track: int = 1,
+               start_bar: int | None = None, arrange: bool = True) -> dict:
+    """Write a whole hand-composed song in one call: a new pattern per section,
+    every part written into its channel's piano roll, and the sections laid out
+    in the playlist. Use it instead of many write_part calls when composing a
+    piece note by note (a classical movement, a ballad, a through-composed song).
+
+    sections: in song order, [{"name": "Exposition", "parts": {"Violins 1":
+      [[pitch, start, length, velocity], ...], "Cello": [...]}, "color": "#4C8BF5"}].
+      A part's key is a channel name or rack index; its notes are as in write_part
+      (beats from the section's start, fractions allowed). A section is as long as
+      its last note, rounded up to a bar.
+    tempo: set FL's tempo first. track / start_bar: as in arrange.
+    arrange: false only writes the patterns; lay them out with arrange (to repeat
+      a section, or to leave a gap between movements).
+
+    Takes about a second per part, and FL comes to the front. Returns each
+    section's pattern number and length, and the arrangement. back takes the
+    clips out, then empties the patterns one by one."""
+    try:
+        return dict(ok=True, **engine.write_song(sections, tempo, track, start_bar, arrange))
     except SeekerError as e:
         return _fail(e)
 
@@ -169,7 +199,7 @@ def list_sounds(search: str = "", kind: str = "all", limit: int = 40) -> dict:
 @mcp.tool()
 def add_channel(sound: str, name: str | None = None, color: str | None = None,
                 volume: float | None = None, pan: float | None = None,
-                show: bool = False) -> dict:
+                show: bool = False, route: bool = True) -> dict:
     """Add a new channel to FL's rack with an instrument or a sample loaded in it.
 
     sound: an id or name from list_sounds ("FLEX", "Drums/Kicks/909 Kick"), or the
@@ -178,12 +208,77 @@ def add_channel(sound: str, name: str | None = None, color: str | None = None,
       Kick, Snare, Clap, Hat, Open hat, Perc, 808 (or Bass), Piano (or Keys), Pad.
     color: "#RRGGBB". volume: 0 to 1 (FL's default is 0.78). pan: -1 left to 1 right.
     show: leave the plugin's window open (it is closed by default).
+    route: send the channel through its own mixer insert, named and coloured
+      after it (see route_channels). On by default.
 
     FL Studio comes to the front while it loads. The channel goes at the end of
-    the rack; returns its index and the role new_beat will give it. There is no
-    undo for this: the user removes a channel in FL (right-click > Delete)."""
+    the rack; returns its index, its mixer insert and the role new_beat will give
+    it. There is no undo for this: the user removes a channel in FL (right-click >
+    Delete)."""
     try:
-        return dict(ok=True, **engine.add_channel(sound, name, color, volume, pan, show))
+        return dict(ok=True, **engine.add_channel(sound, name, color, volume, pan, show,
+                                                  route))
+    except SeekerError as e:
+        return _fail(e)
+
+
+@mcp.tool()
+def route_channels(channels: list[int | str] | None = None, reroute: bool = False) -> dict:
+    """Give channels their own mixer insert instead of summing them into the master:
+    each channel is routed to a free insert, which is named and coloured after it.
+
+    channels: rack indexes or names; default every channel still going straight to
+      the master (fl_status shows each channel's `insert`, 0 = master).
+    reroute: also move channels that already have an insert.
+
+    A free insert is one no channel plays through and the user hasn't named. An
+    insert already named like the channel (a template's labelled insert, e.g. one
+    with an EQ on it) is used first; otherwise insert N for rack index N (FL's
+    Sampler sits at index 0, so the first instrument gets insert 1) when it is
+    free, else the lowest free insert. Effects on an insert are left as they
+    are. add_channel and build_rack already route the channels they add."""
+    try:
+        return dict(ok=True, **engine.route_channels(channels, reroute))
+    except SeekerError as e:
+        return _fail(e)
+
+
+@mcp.tool()
+def eq(channel: int | str, bands: list[dict], clear: bool = True) -> dict:
+    """Set the EQ of one channel: CFilteR-01 (the user's Pro-Q 4 clone) on the
+    channel's mixer insert, in real units.
+
+    channel: rack index or channel name. It must have its own insert
+      (route_channels) with CFilteR-01 in one of the insert's slots.
+    bands: [{"shape": "low cut", "freq": 40, "slope": 12},
+            {"shape": "bell", "freq": 65, "gain": -2, "q": 1.2}, ...]
+      shape: bell, low shelf, low cut (= high pass), high shelf, high cut
+      (= low pass), notch, band pass, tilt shelf, flat tilt, all pass.
+      freq in Hz (10-30000), gain in dB (-30..30), q 0.025-40 (default 1),
+      slope in dB/oct (0-96 or "brickwall"; default the plugin's 12).
+      Optional "band" (1-24; default 1, 2, 3 in order), "on" (false = bypassed).
+    clear: switch every other band off, so the EQ is exactly these bands.
+
+    Returns each band as CFilteR-01 now shows it ("Low Cut 40.000 Hz ..."), read
+    back from the plugin."""
+    try:
+        return dict(ok=True, **engine.eq(channel, bands, clear))
+    except SeekerError as e:
+        return _fail(e)
+
+
+@mcp.tool()
+def mix_eq(genre: str, clear: bool = True) -> dict:
+    """Give every part in the rack the genre's starting EQ, on CFilteR-01 on each
+    channel's mixer insert: a low cut under each part, and the genre's own cuts
+    and lifts so the parts fit together (e.g. jazz: the upright steps aside at the
+    kick's 65 Hz, the Rhodes is cut below 140 Hz, the ride loses some 4 kHz ping).
+
+    Starting points chosen from how the instruments sit, not by ear: invite the
+    user to tune them, then use eq for a single channel. Channels without an
+    insert or without CFilteR-01 come back under problems."""
+    try:
+        return dict(ok=True, **engine.mix_eq(genre, clear))
     except SeekerError as e:
         return _fail(e)
 
@@ -234,9 +329,100 @@ def set_channel(channel: int | str, name: str | None = None, color: str | None =
 
 
 @mcp.tool()
+def new_song(genre: str = "auto", key: str = "C", scale: str = "minor",
+             structure: str = "ABABCB", bars: int = 8, tempo: float | None = None,
+             set_tempo: bool = False, build: bool = False, track: int = 1,
+             start_bar: int | None = None, bass: bool = True, chords: bool = True,
+             pad: bool = True, guitar: bool = True, passing: bool = False) -> dict:
+    """Make a whole song, not a loop: a new pattern for every section, then the
+    sections laid out along a playlist track as pattern clips.
+
+    structure: one letter per section, in song order. A = verse (no pad, so it
+      sits lower), B = chorus (every part), C = bridge (a breakdown without
+      drums); any other letter is a full part of its own. "ABABCB" is verse
+      chorus verse chorus bridge chorus; "AABA", "ABAB", "BABCB" work the same way.
+      Every letter gets its own groove and chord progression; a repeated letter
+      reuses its pattern, so both verses are the same.
+    bars: how long each section lasts (8 by default; patterns are 4 bars and
+      repeat to fill it). ABABCB at 8 bars is a 48-bar song.
+    genre, key, scale, tempo, set_tempo, bass, chords, pad, guitar, passing,
+      build: as in new_beat; they hold for the whole song.
+    track: the playlist track the clips go on. start_bar: where the song starts;
+      by default where the playlist's content ends now (bar 1 when it is empty).
+
+    FL comes to the front and the mouse moves for a few seconds per section: the
+    clips are clicked into the playlist, each one checked against what FL
+    reports. The playlist must be open. FL is left in song mode, not playing.
+    Returns the patterns (section, number, chords) and the arrangement (which
+    bars each section covers). back takes the clips out again; calling back
+    further empties the patterns."""
+    try:
+        return dict(ok=True, **engine.new_song(genre, key, scale, structure, bars, tempo,
+                                               set_tempo, build, track, start_bar, bass,
+                                               chords, pad, guitar, passing))
+    except SeekerError as e:
+        return _fail(e)
+
+
+@mcp.tool()
+def new_ballad(key: str = "Eb", tempo: float = 66, build: bool = False, track: int = 1,
+               start_bar: int | None = None, seed: int | None = None) -> dict:
+    """A whole jazz trio ballad (Wynton Kelly / Bill Evans style), written note by
+    note: Intro (4 bars, Rhodes and bass) - A (8) - A (8, turning to the bridge) -
+    bridge (8, walking bass) - A + tag ending (12, held maj9#11), about 2.5 minutes
+    at 66 BPM. Each section is its own pattern, laid out in the playlist.
+
+    Rhodes: rootless 9th/11th/13th/altered voicings and a melody on top; upright:
+    a two-feel with swung approach notes, walking in the bridge; drums: soft
+    spang-a-lang ride, cross-stick, feathered kick, ghost-note snare triplets.
+    Every call gives new changes and a new melody; `seed` repeats one exactly.
+
+    key: any major key (Eb, Bb, F, Ab, C, Db are the ballad keys). tempo: 40-100.
+    build: add the jazz trio first (on an empty rack, or one without jazz
+    sounds). track / start_bar: as in arrange. new_song with genre "jazz ballad"
+    comes here too. FL comes to the front and the mouse moves while the clips go
+    into the playlist; the playlist must be open.
+
+    Returns each section's pattern, bars and chords per bar, and the seed."""
+    try:
+        return dict(ok=True, **engine.new_ballad(key, tempo, build, track, start_bar, seed))
+    except SeekerError as e:
+        return _fail(e)
+
+
+@mcp.tool()
+def arrange(sections: list[dict], track: int = 1, start_bar: int | None = None,
+            song_mode: bool = True) -> dict:
+    """Place patterns in FL's playlist as clips, one after another on a track:
+    the step from loops to a song.
+
+    sections: in song order, [{"pattern": 1, "bars": 8}, {"pattern": 2}, ...].
+      pattern is the pattern number (new_beat returns it; fl_status shows the
+      selected one). bars is how long the section lasts; a shorter pattern is
+      repeated to fill it. Without bars the pattern is placed once.
+    track: the playlist track (1 = the top one).
+    start_bar: the bar the first section starts on. Leave it out to continue
+      where the playlist's content ends now (bar 1 when it is empty), so calling
+      arrange once per new pattern builds the song up section by section.
+    song_mode: switch FL to song mode afterwards, so Play plays the arrangement.
+
+    Use it after new_beat(new_pattern=true) to put that pattern in the song, or
+    to lay out patterns the user made. FL comes to the front and the mouse moves
+    while the clips are clicked in; the playlist must be open. It does not look
+    for clips already on the track, so pick a free track or the end of the song.
+    back takes the clips out again."""
+    try:
+        return dict(ok=True, **engine.arrange(sections, track, start_bar, song_mode))
+    except SeekerError as e:
+        return _fail(e)
+
+
+@mcp.tool()
 def back() -> dict:
     """Undo the last new_beat or write_part (or the one before, when called again):
-    restores the exact steps, 808 notes, chords, pad and parts the pattern held before."""
+    restores the exact steps, 808 notes, chords, pad and parts the pattern held before.
+    After arrange or new_song it first takes the clips out of the playlist again
+    (through FL's own undo, so it should follow straight after)."""
     try:
         return dict(ok=True, **engine.back())
     except SeekerError as e:
