@@ -339,6 +339,32 @@ def new_song(genre: str = "auto", key: str = "C", scale: str = "minor",
 
 
 @mcp.tool()
+def new_ballad(key: str = "Eb", tempo: float = 66, build: bool = False, track: int = 1,
+               start_bar: int | None = None, seed: int | None = None) -> dict:
+    """A whole jazz trio ballad (Wynton Kelly / Bill Evans style), written note by
+    note: Intro (4 bars, Rhodes and bass) - A (8) - A (8, turning to the bridge) -
+    bridge (8, walking bass) - A + tag ending (12, held maj9#11), about 2.5 minutes
+    at 66 BPM. Each section is its own pattern, laid out in the playlist.
+
+    Rhodes: rootless 9th/11th/13th/altered voicings and a melody on top; upright:
+    a two-feel with swung approach notes, walking in the bridge; drums: soft
+    spang-a-lang ride, cross-stick, feathered kick, ghost-note snare triplets.
+    Every call gives new changes and a new melody; `seed` repeats one exactly.
+
+    key: any major key (Eb, Bb, F, Ab, C, Db are the ballad keys). tempo: 40-100.
+    build: add the jazz trio first (on an empty rack, or one without jazz
+    sounds). track / start_bar: as in arrange. new_song with genre "jazz ballad"
+    comes here too. FL comes to the front and the mouse moves while the clips go
+    into the playlist; the playlist must be open.
+
+    Returns each section's pattern, bars and chords per bar, and the seed."""
+    try:
+        return dict(ok=True, **engine.new_ballad(key, tempo, build, track, start_bar, seed))
+    except SeekerError as e:
+        return _fail(e)
+
+
+@mcp.tool()
 def arrange(sections: list[dict], track: int = 1, start_bar: int | None = None,
             song_mode: bool = True) -> dict:
     """Place patterns in FL's playlist as clips, one after another on a track:

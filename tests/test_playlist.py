@@ -31,6 +31,7 @@ class FakeScreen:
     RACK = (183, 184, 1686, 342)
     MENU = (29, 131, 126, 536)
     TICKS_PER_PIXEL = BAR / 60.0
+    EDGE_SCROLL = 1780
     scale = 1.0
 
     def __init__(self, rack):
@@ -41,6 +42,7 @@ class FakeScreen:
         self.scroll_y = 0       # tracks
         self.menu_open = False
         self.moves = self.scrolls = 0
+        self.slip = 0           # clicks still to come that scroll the view under the mouse
 
     def __enter__(self):
         return self
@@ -110,6 +112,9 @@ class FakeScreen:
         elif y < 130 and abs(x - 34) < 10:
             self.menu_open = True
         elif x >= self.GRID_X and y >= self.GRID_Y and self.cover(x, y) is None:
+            if x >= self.EDGE_SCROLL or self.slip:  # FL scrolls under a click at its edge
+                self.scroll_x += 2 * BAR
+                self.slip = max(0, self.slip - 1)
             tick = self._tick(x)
             start = int(round(tick / BAR)) * BAR if self.snap == BAR_SNAP else int(tick)
             length = self.fl.pattern_steps(self.fl.pattern) * 24
@@ -183,6 +188,20 @@ class ArrangeTest(SongFixture):
         self.engine.arrange([a], track=40, start_bar=101)
         self.assertEqual(self.rack.clips, [(40, a, 100 * BAR)])
         self.assertGreater(self.screen.scrolls, 1)
+
+    def test_a_bar_at_the_right_edge_is_scrolled_into_view_first(self):
+        # bar 25 starts just inside the right edge, where a click makes FL scroll
+        a, _ = self.two_patterns()
+        self.engine.arrange([a], track=5, start_bar=25)
+        self.assertEqual(self.rack.clips, [(5, a, 24 * BAR)])
+        self.assertGreater(self.screen.scrolls, 0)
+
+    def test_a_clip_that_slips_once_is_undone_and_placed_again(self):
+        a, _ = self.two_patterns()
+        self.screen.slip = 1
+        out = self.engine.arrange([a], track=5, start_bar=9)
+        self.assertEqual(self.rack.clips, [(5, a, 8 * BAR)])
+        self.assertIn("placed again", " ".join(out["warnings"]))
 
     def test_a_snap_that_is_already_bar_is_left_alone(self):
         a, _ = self.two_patterns()

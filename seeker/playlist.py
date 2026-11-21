@@ -40,6 +40,7 @@ SNAP_BAR = SNAP_NAMES.index("Bar")
 SNAP_SHAPE = (3.4, 5.0)     # the menu is about 4.2 times as tall as it is wide
 MARK = "Pattern Seeker..."  # put in the hint bar before a hover: never read a stale hint
 MIN_BAR_PIXELS = 5          # zoomed out further than this, a click can't pick a bar
+RIGHT_MARGIN = 0.1          # keep this much of the view right of a bar we click in
 VK_ESCAPE, VK_SHIFT = 0x1B, 0x10
 
 _TIME = re.compile(r"^(\d+):(\d+):(\d+)$")
@@ -201,13 +202,18 @@ class Arranger:
             self.sleep(0.2)
         raise PlaylistError("Couldn't scroll the playlist to track %d." % track)
 
-    def bring(self, tick):
+    def bring(self, tick, center=False):
         """Scroll sideways until bar start `tick` can be clicked; returns the x
         to click. Bar snap rounds to the nearest bar, so anywhere in the bar's
-        first 40% will do (bar 1 has nothing to its left)."""
+        first 40% will do (bar 1 has nothing to its left). The whole bar has to
+        be in view, clear of the right edge: a click near the edge makes FL
+        scroll the playlist under the mouse, and the clip lands elsewhere."""
         per_notch = 0
-        for _ in range(40):
-            if self.t_left <= tick + self.tpb * 0.4 and tick + self.tpb * 0.25 <= self.t_right:
+        for i in range(40):
+            margin = max(self.tpb, (self.t_right - self.t_left) * RIGHT_MARGIN)
+            near_left = tick - self.t_left < (self.t_right - self.t_left) * 0.5
+            if (self.t_left <= tick + self.tpb * 0.4 and tick + margin <= self.t_right
+                    and (not center or near_left or tick < self.tpb)):
                 return max(self.x_left, self.x_of(tick + self.tpb * 0.25))
             if self.tpb / self.ticks_per_pixel < MIN_BAR_PIXELS:
                 raise PlaylistError("The playlist is zoomed out too far to pick a bar - "
@@ -285,21 +291,35 @@ class Arranger:
             for pattern, bar in clips:
                 start = (bar - 1) * self.tpb
                 self.ask(pattern=pattern)
-                x = self.bring(start)
-                if not self.uncover(x, y):
-                    raise PlaylistError("A window covers track %d of the playlist." % track)
-                under = self.ticks(self.hint_at(x, y))
-                if under is None or not start <= under < start + self.tpb * 0.45:
-                    raise PlaylistError("Lost track of where bar %d is in the playlist." % bar)
-                self.screen.click(x, y)
-                landed = self.landed()
-                if landed is None:
-                    raise PlaylistError("FL didn't confirm the clip at bar %d - is there "
-                                        "already a clip on track %d there?" % (bar, track))
-                if landed != start:
+                for attempt in (0, 1):
+                    # a second try scrolls the bar to the left of the view first
+                    x = self.bring(start, center=attempt > 0)
+                    if not self.uncover(x, y):
+                        raise PlaylistError("A window covers track %d of the playlist."
+                                            % track)
+                    under = self.ticks(self.hint_at(x, y))
+                    if under is None or not start <= under < start + self.tpb * 0.45:
+                        raise PlaylistError("Lost track of where bar %d is in the playlist."
+                                            % bar)
+                    self.screen.click(x, y)
+                    landed = self.landed()
+                    if landed is None:
+                        raise PlaylistError("FL didn't confirm the clip at bar %d - is there "
+                                            "already a clip on track %d there?" % (bar, track))
+                    if landed == start:
+                        break
                     self.ask(undo=1)
-                    raise PlaylistError("A clip meant for bar %d landed somewhere else; "
-                                        "it was undone." % bar)
+                    self.sleep(0.2)
+                    self.remeasure()
+                    if attempt:
+                        raise PlaylistError(
+                            "A clip meant for bar %d landed at bar %s instead; it was "
+                            "undone. (Clicked x=%d; the view showed bars %.1f to %.1f.)"
+                            % (bar, landed // self.tpb + 1, x, self.t_left / float(self.tpb) + 1,
+                               self.t_right / float(self.tpb) + 1))
+                    self.warnings.append("The clip for bar %d first landed on bar %d; it "
+                                         "was undone and placed again."
+                                         % (bar, landed // self.tpb + 1))
                 placed.append((pattern, bar))
         except PlaylistError as e:
             e.placed = placed

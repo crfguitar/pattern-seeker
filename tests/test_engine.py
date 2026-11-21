@@ -85,6 +85,13 @@ class FakePianoRoll:
 
     def run_from_menu(self, hwnd):
         self.script.OnRefresh(0x20000)      # what FL reports when a roll script edits
+        rack = getattr(self, "rack", None)
+        if rack is not None and self.written and self.written[-1]:
+            # like FL, the pattern grows to the bar its last note ends in
+            end = max(s + l for _, s, l, _ in self.written[-1])
+            bars = int(-(-end // 16))
+            rack.length_beats[rack.pattern] = max(rack.length_beats.get(rack.pattern, 0),
+                                                  bars * 4)
         return True
 
     def press_run_last_script(self):
@@ -779,7 +786,7 @@ class McpServerTest(unittest.TestCase):
                                  "new_song", "arrange",
                                  "list_sounds", "add_channel", "channel_params",
                                  "set_channel", "build_rack", "route_channels", "eq",
-                                 "mix_eq"})
+                                 "mix_eq", "new_ballad"})
         self.assertFalse(getattr(genres, "is_error", getattr(genres, "isError", False)))
         self.assertIn("Trap", str(genres.content))
 

@@ -11,10 +11,11 @@ status display that refreshes while a beat is being written.
 """
 
 import functools
+import random
 import threading
 import time
 
-from seeker import eq, kits, link, pianoroll, playlist, sounds
+from seeker import ballad, eq, kits, link, pianoroll, playlist, sounds
 from seeker.generator import (CYCLE, KEYS, Seeker, add_passing, bass_pitches, chord_name, in_register,
                               chord_notes, pad_notes)
 from seeker.library import GENRES
@@ -56,6 +57,9 @@ def resolve_genre(text):
             return key
     raise SeekerError("Unknown genre %r. Known: %s"
                       % (text, ", ".join(n for _, n, _ in genre_list())))
+
+
+BALLAD_NAMES = {"jazzballad", "ballad", "balladjazz", "jazzballads"}
 
 
 def resolve_key(text):
@@ -935,6 +939,9 @@ class Engine:
         """A whole song: one new pattern per letter of `structure` (A verse, B
         chorus, C bridge - same genre, key and tempo, each its own groove and
         progression), then the letters laid out in the playlist, `bars` each."""
+        if "".join(c for c in str(genre or "").lower() if c.isalnum()) in BALLAD_NAMES:
+            # a ballad has its own form and is written note by note
+            return self.new_ballad(key if key else "Eb", tempo, build, track, start_bar)
         letters = [c for c in str(structure or "").upper() if c.isalpha()]
         if not letters:
             raise SeekerError("structure is letters, one per section, like ABABCB.")
@@ -988,6 +995,87 @@ class Engine:
         if built:
             out["built"] = built
         return out
+
+    # ---- Jazz Ballad: a whole song written note by note ---------------------------
+    BALLAD_PARTS = {"keys": "chords", "bass": "bass", "ride": "hat", "rim": "perc",
+                    "kick": "kick", "snare": "snare"}
+
+    @_locked
+    def new_ballad(self, key="Eb", tempo=66, build=False, track=1, start_bar=None, seed=None):
+        """A jazz trio ballad (seeker/ballad.py): Intro, A, A, bridge, A + tag
+        ending, each section its own pattern of piano-roll parts, laid out in
+        the playlist."""
+        hb = self._need_fl()
+        key_i = resolve_key(key)
+        tempo = 66.0 if tempo is None else float(tempo)
+        if not 40 <= tempo <= 100:
+            raise SeekerError("A ballad sits between 40 and 100 BPM (66 is typical).")
+        built = None
+        if build:
+            built = self.build_rack("jazz", [r for r in kits.ROLES if r not in ("pad", "guitar")])
+            hb = self._settled_rack(len(hb["channels"]) + len(built["added"]))
+        rolemap, _ = fit_rack(hb["channels"], "jazz", strict=bool(build))
+        missing = [part for part, role in self.BALLAD_PARTS.items() if role not in rolemap]
+        if "keys" in missing or "bass" in missing:
+            raise SeekerError("The ballad needs a keys channel and a bass channel that suit "
+                              "jazz (Rhodes, Piano, Upright Bass...). Use build=true to add "
+                              "the trio.")
+        seed = seed if seed is not None else random.randrange(1 << 30)
+        song = ballad.compose(key_i, seed)
+        made, problems = [], []
+        for i, sec in enumerate(song["sections"]):
+            rolls = []
+            for part, notes in sec["parts"].items():
+                ch = rolemap.get(self.BALLAD_PARTS[part])
+                if ch and notes:
+                    steps = [(p, s * 4, l * 4, v) for p, s, l, v in notes]
+                    rolls.append((self._roll_key(ch), ch, steps))
+            name = "%s - Jazz Ballad" % sec["name"]
+            req = {"cmd": "apply", "tracks": [], "fill": False, "newPattern": True,
+                   "patternName": name, "autoPlay": False,
+                   "tempo": tempo if i == 0 else None}
+            if rolls and pianoroll.write_script(rolls[0][2]):
+                req["pianoRoll"] = {"channel": rolls[0][1]["index"], "name": rolls[0][1]["name"]}
+            else:
+                rolls = []
+            res = self._apply(req)
+            pattern = res["pattern"]
+            self.history.append((pattern, res["prev"], self.last_rolls.get(pattern)))
+            wrong = self._run_rolls(rolls) if rolls else []
+            if wrong:
+                # A piano roll that didn't take (seen on the first one after channels
+                # were added): those channels once more.
+                again = [r for r in rolls if any(e.startswith(r[1]["name"] + ":") for e in wrong)]
+                wrong = self._rewrite_rolls(again)
+            problems += ["%s: %s" % (sec["name"], w) for w in wrong]
+            self.last_rolls[pattern] = {k: n for k, _, n in rolls}
+            color = ballad.SECTION_COLORS.get(sec["name"].rstrip("123"), 0x4F7FB0)
+            self._song(pattern=pattern, name=name, color=color)
+            made.append({"section": sec["name"], "pattern": pattern, "bars": sec["bars"],
+                         "chords": sec["chords"]})
+        laid = self.arrange([(m["pattern"], m["bars"]) for m in made], track, start_bar)
+        out = {"genre": "Jazz Ballad", "key": "%s major" % ballad.NAMES[key_i], "tempo": tempo,
+               "seed": seed, "form": "Intro A A B A + ending", "sections": made,
+               "arrangement": laid,
+               "written": {part: rolemap[role]["name"] for part, role in
+                           self.BALLAD_PARTS.items() if role in rolemap},
+               "noChannelFor": missing, "problems": problems}
+        if built:
+            out["built"] = built
+        return out
+
+    def _rewrite_rolls(self, rolls):
+        """Write rolls whose piano roll didn't take: open each one's roll again."""
+        if not rolls:
+            return []
+        if not pianoroll.write_script(rolls[0][2]):
+            return ["%s: couldn't write the piano-roll script" % rolls[0][1]["name"]]
+        res = self._ask({"cmd": "pianoRoll", "pianoRoll": {
+            "channel": rolls[0][1]["index"], "name": rolls[0][1]["name"]}})
+        if res is None or res.get("pianoRoll"):
+            link.send({"cmd": "closePianoRoll"})
+            return ["%s: couldn't open the piano roll" % r[1]["name"] for r in rolls]
+        return self._run_rolls(rolls)
 
     # ---- Back ------------------------------------------------------------
     @_locked

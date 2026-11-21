@@ -41,6 +41,16 @@ When the user wants a song, an arrangement, a structure ("verse chorus verse",
   is given.
 - "Put pattern 2 after it", "repeat the chorus" -> `arrange`.
 - "Undo", "take that out" straight after -> `back` removes the clips.
+- "A jazz ballad", "a slow jazz tune", "something like Wynton Kelly / Bill
+  Evans" -> `new_ballad` with the key (Eb, Bb, F, Ab, C, Db suit it) and the
+  tempo (66 when none is named). It writes the whole song note by note:
+  Intro, A, A, bridge, A + tag ending, 40 bars. Add `build=true` on a rack
+  without the jazz trio. Reply with each section's bars and chords, and the
+  `seed` (the same seed rebuilds the same ballad). "Another one" -> call it
+  again without a seed. `new_song` with genre "jazz ballad" does the same.
+  The generator came from a hand-written ballad the user loved
+  (`examples/jazz_ballad.py`); for a new style, hand-write it with
+  `write_part` first and turn what works into rules.
 
 Tell the user beforehand that FL comes to the front and the mouse moves for a
 few seconds. Afterwards reply with the structure, the bars each section covers
