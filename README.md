@@ -21,11 +21,19 @@ whose sound suits it: a classical piece gets a cello, never the 808.
 And it can turn loops into a song. One request writes a pattern for each section
 (verse, chorus, bridge) in the same genre, key and tempo, then lays the sections
 out along a playlist track as pattern clips: ABABCB, AABA, or any order you name.
+Longer forms are written note by note: a 40-bar jazz ballad in one request, or
+a whole hand-composed piece (the `examples/` hold two three-movement pieces for
+chamber orchestra) in one call.
+
+Every channel gets its own named mixer insert, and the EQ is set on
+CFilteR-01 in each insert, in Hz, dB and Q, from a genre's starting points or
+worked out from a piece's score.
 
 There are two ways to drive it:
 
 - **The Pattern Seeker window** (`pattern_seeker.pyw`): an always-on-top window
-  with NEW BEAT, a global hotkey (Ctrl+Alt+B), and genre/key/scale pickers.
+  with NEW BEAT, a global hotkey (Ctrl+Alt+B), genre/key/tempo pickers, and
+  tabs for whole songs and for the rack (build a kit, mixer routing, EQ).
 - **The Pattern Seeker MCP server** (`mcp_server.py`): the same engine exposed
   over the [Model Context Protocol](https://modelcontextprotocol.io), so Claude
   (or any MCP client) can make beats from a plain request: *"give me a lo-fi beat
@@ -95,6 +103,11 @@ freezes while FL writes the pattern.
 | `add_channel`    | Add a new channel with an instrument or a sample in it; optional `name`, `color`, `volume`, `pan`. Name it Kick / Snare / Hat / 808 / Piano / Pad and `new_beat` writes to it                                                                                                                                                                                                                                                                                            |
 | `channel_params` | A channel's color, volume, pan, and its plugin's parameters (searchable) and preset names                                                                                                                                                                                                                                                                                                                                                                                          |
 | `set_channel`    | Rename, recolour, set volume and pan, load a plugin preset by name or by stepping, and set plugin parameters (`{"Decay": 0.3}`)                                                                                                                                                                                                                                                                                                                                                  |
+| `write_song`     | A hand-written piece in one call: a new pattern per section with every part's notes, laid out in the playlist (`arrange=false` writes the patterns only, for repeats and gaps between movements) |
+| `new_ballad`     | A whole jazz ballad written note by note (intro, A A B A + tag, 40 bars) for the jazz trio; `seed` rebuilds the same one |
+| `route_channels` | Give every channel its own named, coloured mixer insert instead of the master |
+| `eq`             | One channel's EQ on CFilteR-01 in its insert, in Hz / dB / Q, read back from the plugin |
+| `mix_eq`         | The genre's starting EQ on every part's insert |
 
 ### Genre kits
 
@@ -182,6 +195,31 @@ Limits:
   should follow straight after. Patterns can't be deleted from here.
 - The menu positions were measured in FL Studio 2026 with the default theme.
 
+### Hand-written pieces
+
+`examples/` holds whole pieces written note by note, as models for generators:
+`jazz_ballad.py` (the source of `new_ballad`), `sinfonietta.py` and
+`divertimento.py` (three-movement Classical-era pieces for chamber orchestra).
+Each one composes, checks every part's range and bar lengths, and writes
+through the engine while the MCP server runs (the Divertimento has about
+10,000 notes, too many for one MCP call): `python examples/divertimento.py` prints the plan, `build`
+or `add_channel` makes the channels, `write` writes and lays it out, and
+`rewrite` puts new notes into the same patterns without touching the
+playlist.
+
+Dynamics are velocity, and FLEX turns velocity straight into loudness, so the
+Divertimento keeps pp to ff within velocity 54-88. Changes are smoothed into
+two-bar crescendos and diminuendos, and ff is kept for each movement's climax
+and coda. `divertimento_eq.py` works its EQ out from the score: low cuts
+under each part's lowest note in any movement, and small cuts, at most two
+per part, on whichever part is accompanying where two parts share a
+frequency at the same time. `sinfonietta_eq.py` does the same for the
+Sinfonietta: each low cut sits at 0.65 x the part's lowest note in any movement
+(under 1 dB lost there), contrabass and timpani only lose subsonic rumble, and
+the pocket cuts (cello vs bassoon and horns, violas vs inner winds, violins II
+vs oboe and violin I) all stay under 4 kHz. Both print their plan, and `apply`
+sets it.
+
 ### Building the rack
 
 FL's scripting API has no call that adds a channel or loads a plugin. Pattern
@@ -208,7 +246,9 @@ Limits:
   works for plugins that show the preset's name in FL's hint bar after a step
   (FLEX does). For the others (FL Keys), step with `preset=1`, or add a new
   channel from the preset's file.
-- Effects and mixer routing are not covered.
+- An effect can't be loaded into a mixer insert from here (FL always opens it
+  on the master). Channels are routed to their own inserts (`route_channels`),
+  and CFilteR-01 is set (`eq`, `mix_eq`) where a template already has it.
 
 Add your own sample folders in
 `%LOCALAPPDATA%\PatternSeeker\settings.json`: `"sampleFolders": ["D:\\Samples"]`.
@@ -239,9 +279,11 @@ Add your own sample folders in
 6. Restart the MCP client and ask for a beat, for example *"make me a boom bap
    beat in D minor"*.
 
-Start loopMIDI before FL Studio: FL looks for MIDI ports when it launches. Only
-one program can hold the MIDI ports at a time, so close the Pattern Seeker
-window while an MCP client is using the server.
+Start loopMIDI before FL Studio: FL looks for MIDI ports when it launches. With
+the classic Windows MIDI driver only one program can hold the MIDI ports at a
+time, so close the Pattern Seeker window while an MCP client is using the
+server. Under the newer Windows MIDI Service (Windows 11) they could be shared:
+the example scripts ran beside a running MCP server on the author's PC.
 
 ### Using the desktop window instead
 
@@ -249,8 +291,25 @@ window while an MCP client is using the server.
 pythonw pattern_seeker.pyw
 ```
 
-Pick a genre, key and scale, then press **NEW BEAT** (or Space, or Ctrl+Alt+B
-from anywhere). **◀ Back** undoes. The window uses the same MIDI setup (steps 2-4).
+The top of the window says what to write: genre, key and scale, an exact tempo
+(empty keeps FL's), which parts play (drums, bass, chords, pad, guitar), a
+passing chord at the end, and **Build rack** to add the genre's instruments
+first. The tabs say where it goes:
+
+- **Beat**: **NEW BEAT** (or Space, or Ctrl+Alt+B from anywhere) writes a groove
+  on the current pattern, or on a new one.
+- **Song**: **NEW SONG** writes a pattern per letter of the structure (`ABABCB`)
+  and lays them out on a playlist track. **Jazz ballad** writes the 40-bar
+  ballad (type a seed to get the same one again). **Add pattern to song**
+  places the pattern selected in FL at the song's end.
+- **Rack**: every channel with its part and mixer insert. **Build kit** adds
+  the genre's sounds, **Route to mixer** gives each channel its own insert,
+  **EQ the mix** sets the genre's starting EQ on CFilteR-01. Search for a sound
+  to add it as a channel, or rename a channel so a genre picks it up.
+
+**◀ Back** undoes the last beat, or takes a song's clips out of the playlist.
+The window uses the same MIDI setup (steps 2-4). Writing single notes
+(`write_part`), per-band EQ and plugin parameters stay with the MCP tools.
 
 ## Tests
 
@@ -258,15 +317,19 @@ from anywhere). **◀ Back** undoes. The window uses the same MIDI setup (steps 
 python -m unittest discover tests
 ```
 
-77 tests. They cover the music rules (every 808 note in key, chords voiced close,
+101 tests. They cover the music rules (every 808 note in key, chords voiced close,
 progressions that keep changing). They also load the **real FL controller
 script** against a simulated channel rack and drive it through the real SysEx
 encoder, for both the app's requests and the MCP engine (new beat, then Back
 restores the user's own steps), and for building: adding channels, genre kits,
 presets and parameters, and which channels a genre plays. Songs are tested
 against a simulated playlist window that answers hovers and clicks the way FL
-does (snap menu, scrolling, a channel rack in the way). One test starts the MCP server over stdio, does
-the protocol handshake and calls a tool.
+does (snap menu, scrolling, a channel rack in the way), and so are the jazz
+ballad (480 generated ballads checked for clashes and lengths), `write_song`,
+mixer routing and the EQ read-back (including a plugin that reports a value it
+didn't take). The desktop window's text for beats, songs, ballads and the rack
+is checked on real engine results. One test starts the MCP server over stdio,
+does the protocol handshake and calls a tool.
 
 ## Platform
 

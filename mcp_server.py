@@ -130,6 +130,32 @@ def write_part(channel: int | str, notes: list[list[float]]) -> dict:
 
 
 @mcp.tool()
+def write_song(sections: list[dict], tempo: float | None = None, track: int = 1,
+               start_bar: int | None = None, arrange: bool = True) -> dict:
+    """Write a whole hand-composed song in one call: a new pattern per section,
+    every part written into its channel's piano roll, and the sections laid out
+    in the playlist. Use it instead of many write_part calls when composing a
+    piece note by note (a classical movement, a ballad, a through-composed song).
+
+    sections: in song order, [{"name": "Exposition", "parts": {"Violins 1":
+      [[pitch, start, length, velocity], ...], "Cello": [...]}, "color": "#4C8BF5"}].
+      A part's key is a channel name or rack index; its notes are as in write_part
+      (beats from the section's start, fractions allowed). A section is as long as
+      its last note, rounded up to a bar.
+    tempo: set FL's tempo first. track / start_bar: as in arrange.
+    arrange: false only writes the patterns; lay them out with arrange (to repeat
+      a section, or to leave a gap between movements).
+
+    Takes about a second per part, and FL comes to the front. Returns each
+    section's pattern number and length, and the arrangement. back takes the
+    clips out, then empties the patterns one by one."""
+    try:
+        return dict(ok=True, **engine.write_song(sections, tempo, track, start_bar, arrange))
+    except SeekerError as e:
+        return _fail(e)
+
+
+@mcp.tool()
 def build_rack(genre: str, parts: list[str] | None = None) -> dict:
     """Build the instruments a genre needs: adds a channel, with a fitting stock
     sound loaded, named and coloured, for each part the rack has no channel for.

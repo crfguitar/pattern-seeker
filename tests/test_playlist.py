@@ -274,6 +274,23 @@ class SongTest(SongFixture):
                                            (3, a, 16 * BAR)])
         self.assertEqual(out["structure"], "AABA")
 
+    def test_a_hand_written_song_goes_in_as_a_pattern_per_section(self):
+        self.roll.rack = self.rack          # FL grows a pattern to its last note
+        tune = [[60 + i, i, 1, 90] for i in range(16)]             # four bars
+        out = self.engine.write_song(
+            [{"name": "Theme", "parts": {"FL Keys": tune, 6: [[48, 0, 16, 60]]}},
+             {"name": "Coda", "color": "#F5A623", "parts": {"FL Keys": tune[:6]}}], tempo=132)
+        theme, coda = (s["pattern"] for s in out["sections"])
+        self.assertEqual(self.rack.tempo, 132)
+        self.assertEqual(self.rack.pattern_names[theme], "Theme")
+        self.assertEqual(out["sections"][0]["written"], {"FL Keys": 16, "Padilion": 1})
+        self.assertEqual(self.rack.clips, [(1, theme, 0), (1, coda, 4 * BAR)])
+        self.assertEqual(out["arrangement"]["endBar"], 6)   # six beats round up to two bars
+        self.assertEqual(out["problems"], [])
+        with self.assertRaisesRegex(SeekerError, "No channel 'Tuba'"):
+            self.engine.write_song([{"name": "X", "parts": {"Tuba": tune}}])
+        self.assertEqual(len(self.rack.clips), 2)           # nothing written on bad input
+
     def test_bad_input_is_explained(self):
         for kwargs in ({"structure": "123"}, {"bars": 0}, {"bars": "x"},
                        {"structure": "ABCDEFGHI"}):

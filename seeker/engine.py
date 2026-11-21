@@ -334,25 +334,7 @@ class Engine:
         what an earlier write_part put there; anything else in that roll is kept."""
         hb = self._need_fl()
         target = self._find_channel(hb["channels"], channel)
-        if not isinstance(notes, (list, tuple)) or not notes:
-            raise SeekerError("notes must be a non-empty list of "
-                              "[pitch, start beat, length in beats, velocity].")
-        if len(notes) > self.MAX_PART_NOTES:
-            raise SeekerError("At most %d notes at a time." % self.MAX_PART_NOTES)
-        steps = []
-        for i, n in enumerate(notes):
-            try:
-                pitch, start, length = int(n[0]), float(n[1]), float(n[2])
-                vel = int(n[3]) if len(n) > 3 else 100
-            except (TypeError, ValueError, IndexError):
-                raise SeekerError("note %d (%r) should be [pitch, start beat, length in "
-                                  "beats, velocity]." % (i, n))
-            if not 0 <= pitch <= 127:
-                raise SeekerError("note %d: pitch %d is outside 0-127." % (i, pitch))
-            if start < 0 or length <= 0 or start * 4 >= pianoroll.MAX_STEPS:
-                raise SeekerError("note %d: start must be >= 0 (and under %d beats) and "
-                                  "length > 0." % (i, pianoroll.MAX_STEPS // 4))
-            steps.append((pitch, start * 4, length * 4, max(1, min(127, vel))))
+        steps = self._steps(notes)
         if not pianoroll.write_script(steps):
             raise SeekerError("Couldn't write the piano-roll script (FL's Settings "
                               "folder is missing).")
@@ -375,6 +357,29 @@ class Engine:
         return {"channel": target["name"], "pattern": pattern, "notes": len(steps),
                 "beats": round(end, 3), "problems": problems,
                 "canGoBack": bool(self.history)}
+
+    def _steps(self, notes, what="notes"):
+        """[[pitch, start beat, length in beats, velocity]] -> piano-roll steps, checked."""
+        if not isinstance(notes, (list, tuple)) or not notes:
+            raise SeekerError("%s must be a non-empty list of "
+                              "[pitch, start beat, length in beats, velocity]." % what)
+        if len(notes) > self.MAX_PART_NOTES:
+            raise SeekerError("At most %d notes at a time." % self.MAX_PART_NOTES)
+        steps = []
+        for i, n in enumerate(notes):
+            try:
+                pitch, start, length = int(n[0]), float(n[1]), float(n[2])
+                vel = int(n[3]) if len(n) > 3 else 100
+            except (TypeError, ValueError, IndexError):
+                raise SeekerError("note %d (%r) should be [pitch, start beat, length in "
+                                  "beats, velocity]." % (i, n))
+            if not 0 <= pitch <= 127:
+                raise SeekerError("note %d: pitch %d is outside 0-127." % (i, pitch))
+            if start < 0 or length <= 0 or start * 4 >= pianoroll.MAX_STEPS:
+                raise SeekerError("note %d: start must be >= 0 (and under %d beats) and "
+                                  "length > 0." % (i, pianoroll.MAX_STEPS // 4))
+            steps.append((pitch, start * 4, length * 4, max(1, min(127, vel))))
+        return steps
 
     @staticmethod
     def _find_channel(rack, channel):
@@ -1032,15 +1037,35 @@ class Engine:
                               "the trio.")
         seed = seed if seed is not None else random.randrange(1 << 30)
         song = ballad.compose(key_i, seed)
-        made, problems = [], []
-        for i, sec in enumerate(song["sections"]):
+        items = []
+        for sec in song["sections"]:
             rolls = []
             for part, notes in sec["parts"].items():
                 ch = rolemap.get(self.BALLAD_PARTS[part])
                 if ch and notes:
                     steps = [(p, s * 4, l * 4, v) for p, s, l, v in notes]
                     rolls.append((self._roll_key(ch), ch, steps))
-            name = "%s - Jazz Ballad" % sec["name"]
+            items.append((sec["name"], "%s - Jazz Ballad" % sec["name"],
+                          ballad.SECTION_COLORS.get(sec["name"].rstrip("123"), 0x4F7FB0), rolls))
+        patterns, problems = self._write_patterns(items, tempo)
+        made = [{"section": sec["name"], "pattern": pattern, "bars": sec["bars"],
+                 "chords": sec["chords"]} for sec, pattern in zip(song["sections"], patterns)]
+        laid = self.arrange([(m["pattern"], m["bars"]) for m in made], track, start_bar)
+        out = {"genre": "Jazz Ballad", "key": "%s major" % ballad.NAMES[key_i], "tempo": tempo,
+               "seed": seed, "form": "Intro A A B A + ending", "sections": made,
+               "arrangement": laid,
+               "written": {part: rolemap[role]["name"] for part, role in
+                           self.BALLAD_PARTS.items() if role in rolemap},
+               "noChannelFor": missing, "problems": problems}
+        if built:
+            out["built"] = built
+        return out
+
+    def _write_patterns(self, items, tempo=None):
+        """A new pattern for each of `items` = (label, pattern name, colour, rolls),
+        its piano rolls written. Returns ([pattern numbers], problems)."""
+        patterns, problems = [], []
+        for i, (label, name, color, rolls) in enumerate(items):
             req = {"cmd": "apply", "tracks": [], "fill": False, "newPattern": True,
                    "patternName": name, "autoPlay": False,
                    "tempo": tempo if i == 0 else None}
@@ -1051,27 +1076,67 @@ class Engine:
             res = self._apply(req)
             pattern = res["pattern"]
             self.history.append((pattern, res["prev"], self.last_rolls.get(pattern)))
+            del self.history[:-50]
             wrong = self._run_rolls(rolls) if rolls else []
             if wrong:
                 # A piano roll that didn't take (seen on the first one after channels
                 # were added): those channels once more.
                 again = [r for r in rolls if any(e.startswith(r[1]["name"] + ":") for e in wrong)]
                 wrong = self._rewrite_rolls(again)
-            problems += ["%s: %s" % (sec["name"], w) for w in wrong]
+            problems += ["%s: %s" % (label, w) for w in wrong]
             self.last_rolls[pattern] = {k: n for k, _, n in rolls}
-            color = ballad.SECTION_COLORS.get(sec["name"].rstrip("123"), 0x4F7FB0)
             self._song(pattern=pattern, name=name, color=color)
-            made.append({"section": sec["name"], "pattern": pattern, "bars": sec["bars"],
-                         "chords": sec["chords"]})
-        laid = self.arrange([(m["pattern"], m["bars"]) for m in made], track, start_bar)
-        out = {"genre": "Jazz Ballad", "key": "%s major" % ballad.NAMES[key_i], "tempo": tempo,
-               "seed": seed, "form": "Intro A A B A + ending", "sections": made,
-               "arrangement": laid,
-               "written": {part: rolemap[role]["name"] for part, role in
-                           self.BALLAD_PARTS.items() if role in rolemap},
-               "noChannelFor": missing, "problems": problems}
-        if built:
-            out["built"] = built
+            patterns.append(pattern)
+        return patterns, problems
+
+    MAX_SONG_SECTIONS = 40
+
+    @_locked
+    def write_song(self, sections, tempo=None, track=1, start_bar=None, arrange=True):
+        """Your own song, note by note, in one go: a new pattern per section with
+        every part written into its channel's piano roll, then (arrange) the
+        sections laid out in the playlist in the order given.
+
+        sections: [{"name": "Exposition", "parts": {channel: notes}, "color":
+        "#RRGGBB"}]; channel is a rack index or name, notes as in write_part."""
+        hb = self._need_fl()
+        if not isinstance(sections, (list, tuple)) or not sections:
+            raise SeekerError('sections must be a list like [{"name": "Intro", "parts": '
+                              '{"Piano": [[60, 0, 1, 90]]}}].')
+        if len(sections) > self.MAX_SONG_SECTIONS:
+            raise SeekerError("At most %d sections in one go." % self.MAX_SONG_SECTIONS)
+        if tempo is not None:
+            try:
+                tempo = float(tempo)
+            except (TypeError, ValueError):
+                raise SeekerError("tempo must be a number of BPM, like 90.")
+            if not 10 <= tempo <= 522:
+                raise SeekerError("tempo must be between 10 and 522 BPM (FL's range).")
+        items, made = [], []
+        for n, sec in enumerate(sections, 1):       # everything is checked before FL is touched
+            if not isinstance(sec, dict) or not isinstance(sec.get("parts"), dict):
+                raise SeekerError("section %d needs \"parts\": {channel: notes}." % n)
+            name = str(sec.get("name") or "Section %d" % n).strip()
+            color = self._channel_change(None, sec.get("color"), None, None).get("color", 0x4F7FB0)
+            rolls, end = [], 0.0
+            for channel, notes in sec["parts"].items():
+                ch = self._find_channel(hb["channels"], channel)
+                steps = self._steps(notes, "%s / %s" % (name, ch["name"]))
+                rolls.append((self._roll_key(ch), ch, steps))
+                end = max(end, max(s + l for _, s, l, _ in steps) / 4.0)
+            items.append((name, name, color, rolls))
+            made.append({"section": name, "beats": round(end, 3),
+                         "written": {ch["name"]: len(steps) for _, ch, steps in rolls}})
+        patterns, problems = self._write_patterns(items, tempo)
+        for row, pattern in zip(made, patterns):
+            row["pattern"] = pattern
+        out = {"sections": made, "problems": problems, "canGoBack": bool(self.history)}
+        if tempo is not None:
+            out["tempo"] = tempo
+        if arrange:
+            out["arrangement"] = self.arrange([(p, None) for p in patterns], track, start_bar)
+            for row, sec in zip(out["arrangement"]["sections"], made):
+                row["section"] = sec["section"]
         return out
 
     def _rewrite_rolls(self, rolls):

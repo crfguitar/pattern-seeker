@@ -49,8 +49,43 @@ When the user wants a song, an arrangement, a structure ("verse chorus verse",
   `seed` (the same seed rebuilds the same ballad). "Another one" -> call it
   again without a seed. `new_song` with genre "jazz ballad" does the same.
   The generator came from a hand-written ballad the user loved
-  (`examples/jazz_ballad.py`); for a new style, hand-write it with
-  `write_part` first and turn what works into rules.
+  (`examples/jazz_ballad.py`); for a new style, hand-write it first and turn
+  what works into rules.
+- Hand-writing a whole piece → `write_song`: every section's parts in one
+  call, a new pattern each, laid out in the playlist. Use it instead of dozens
+  of `write_part` calls. `arrange=false` writes the patterns only, for forms
+  that repeat a section (a rondo) or leave gaps between movements.
+- A classical piece is not a loop: themes in phrases with cadences, a key
+  plan (away and home), development, a return, a coda, and changing textures
+  and dynamics. The hand-written models are `examples/sinfonietta.py` (three
+  movements, chamber orchestra, Classical era) and `examples/divertimento.py`
+  (B-flat, ten players so each gets one of the CFilteR-01 inserts 1-10;
+  sonata form with the exposition repeated, an Adagio, a 6/8 rondo). The
+  user signed off on the Divertimento's dynamics: model new pieces on it.
+- Dynamics are velocity, and FLEX turns velocity straight into loudness (it
+  has no velocity-sensitivity setting). The user found a span of 34-125, with
+  sections jumping p to ff on one beat, "absolutely LOUD then soft,
+  unnatural". What works (`DYN`, `OFF_SCALE`, `shape` in divertimento.py):
+  pp-ff = velocity 54-88; the melody about +5 over its section and the
+  accompaniment -4 to -6 under; accents +3; changes smoothed over two bars,
+  centred, so each is a short crescendo or diminuendo; every section starts at
+  its own level (entering at the previous section's level makes a soft theme
+  open loud and fade); ff only for a movement's climax and coda, transitions
+  and cadence chords at f. Check it before writing: velocities stay within
+  about 50-100, and the median of a bar moves no more than about 10 from the
+  last one.
+- Too many notes for one MCP call (the Divertimento has about 10,000)? A
+  script in `examples/` calls `Engine.write_song` directly while the MCP server
+  runs. To change notes without touching the playlist, select each pattern
+  (`engine._song(pattern=n)`) and `write_part` every part again: the
+  piano-roll script only replaces Pattern Seeker's own notes
+  (`divertimento.py rewrite`).
+- EQ for a hand-written piece comes from its score:
+  `examples/divertimento_eq.py` puts each low cut under the part's lowest note
+  in any movement. It finds where two parts share a frequency at the same
+  time and cuts the part that is accompanying, never the tune: at most two
+  bells per part, -1.5 to -3 dB, Q 2.5-3.5, nothing above 4 kHz, no boosts.
+  Apply the bands with `eq` per channel.
 
 Tell the user beforehand that FL comes to the front and the mouse moves for a
 few seconds. Afterwards reply with the structure, the bars each section covers

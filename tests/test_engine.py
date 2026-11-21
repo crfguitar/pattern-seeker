@@ -836,7 +836,7 @@ class McpServerTest(unittest.TestCase):
 
         names, genres = asyncio.run(run())
         self.assertEqual(names, {"list_genres", "fl_status", "new_beat", "write_part", "back",
-                                 "new_song", "arrange",
+                                 "new_song", "arrange", "write_song",
                                  "list_sounds", "add_channel", "channel_params",
                                  "set_channel", "build_rack", "route_channels", "eq",
                                  "mix_eq", "new_ballad"})
