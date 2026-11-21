@@ -395,7 +395,16 @@ def load_script(rack):
     def set_any(value, i, ch, slot=None):
         if slot is None:
             return set_param(value, i, ch)
-        rack.fx[(ch, slot)]["params"][i][1] = value
+        fx = rack.fx[(ch, slot)]
+        fx["params"][i][1] = value
+        if "on_set" in fx:          # an effect whose own state can differ from FL's value
+            fx["on_set"](i, value)
+
+    def param_text(i, ch, slot=None):
+        fx = target(ch, slot)
+        if "text" in fx:
+            return fx["text"](i)
+        return "%d%%" % round(fx["params"][i][1] * 100)
 
     mod("plugins",
         isValid=lambda ch, slot=None: (ch in rack.plugins if slot is None
@@ -404,8 +413,7 @@ def load_script(rack):
         getParamCount=lambda ch, slot=None: len(target(ch, slot)["params"]),
         getParamName=lambda i, ch, slot=None: target(ch, slot)["params"][i][0],
         getParamValue=lambda i, ch, slot=None: target(ch, slot)["params"][i][1],
-        getParamValueString=lambda i, ch, slot=None: "%d%%" % round(
-            target(ch, slot)["params"][i][1] * 100),
+        getParamValueString=param_text,
         setParamValue=set_any, nextPreset=step_preset(1), prevPreset=step_preset(-1),
         getPresetCount=lambda ch: len(rack.presets),
         getName=lambda ch, slot, flag, i: rack.presets[i])

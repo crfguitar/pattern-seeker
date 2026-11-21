@@ -90,6 +90,67 @@ def band_sets(slot, bands):
     return rows, used
 
 
+def _numbered(bands):
+    """(band number, band) in the order band_sets numbers them."""
+    return [(int(b.get("band", n)), b) for n, b in enumerate(bands, 1)]
+
+
+def _number(text):
+    """The first number in a parameter's text, in Hz when it says kHz."""
+    import re
+    m = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if not m:
+        return None
+    return float(m.group()) * (1000.0 if "khz" in text.lower() else 1.0)
+
+
+def text_matches(offset, band, text):
+    """Does the plugin's own text for a band parameter say what was asked?
+    True / False, or None when the text isn't CFilteR-01's (it can't tell)."""
+    t = (text or "").strip()
+    low = t.lower()
+    if not t or "%" in t:
+        return None
+    if offset == SHAPE:
+        want = SHAPES[int(round(norm_shape(band.get("shape", "bell")) * (len(SHAPES) - 1)))]
+        return low.replace("-", " ") == want
+    if offset == SLOPE:
+        if isinstance(band.get("slope"), str) and "brick" in band["slope"].lower():
+            return "brick" in low
+        n = _number(t)
+        return None if n is None else abs(n - min(max(float(band["slope"]), 0), 96)) < 0.6
+    n = _number(t)
+    if n is None:
+        return None
+    if offset == FREQ:
+        want = min(max(float(band["freq"]), MIN_FREQ), MAX_FREQ)
+        return "hz" in low and abs(n - want) <= want * 0.005
+    if offset == GAIN:
+        want = min(max(float(band.get("gain", 0.0)), MIN_GAIN), MAX_GAIN)
+        return "db" in low and abs(n - want) < 0.03
+    if offset == Q:
+        want = min(max(float(band.get("q", 1.0)), MIN_Q), MAX_Q)
+        return abs(n - want) <= max(want * 0.01, 0.002)
+    return None
+
+
+def misread(bands, got):
+    """Parameter indexes whose read-back text contradicts what `bands` asked for.
+    got: the read-back rows [slot, index, name, value, text]."""
+    want = {}
+    for num, b in _numbered(bands):
+        for offset in (FREQ, GAIN, Q, SHAPE, SLOPE):
+            if offset != SLOPE or "slope" in b:
+                want[(num - 1) * PARAMS_PER_BAND + offset] = (offset, b)
+    bad = set()
+    for row in got:
+        if row[1] in want and len(row) > 4:
+            offset, b = want[row[1]]
+            if text_matches(offset, b, row[4]) is False:
+                bad.add(row[1])
+    return bad
+
+
 def clear_sets(slot, keep=()):
     """Mark every band not in `keep` unused (a flat EQ but for the given bands)."""
     return [[slot, (n - 1) * PARAMS_PER_BAND + USED, 0.0]

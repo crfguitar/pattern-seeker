@@ -489,6 +489,59 @@ class EqTest(SoundsFixture):
         self.assertAlmostEqual(self.value(5, 2, "Gain"), 28 / 60.0)
         self.assertEqual(self.value(5, 5, "Used"), 0.0)     # cleared
 
+    def lying_cfilter(self, drops):
+        """A CFilteR-01 like the one seen live: FL's value says a setting took, but the
+        plugin's own text shows its old value. `drops`: how many writes of each band 4
+        and 5 parameter it ignores."""
+        from seeker import eq
+        fx = fake_cfilter()
+        real = [v for _, v in fx["params"]]
+        missed = {}
+
+        def on_set(i, value):
+            if 3 <= i // 24 <= 4 and missed.get(i, 0) < drops:
+                missed[i] = missed.get(i, 0) + 1
+                return
+            real[i] = value
+
+        def text(i):
+            v, off = real[i], i % 24
+            if off == eq.FREQ:
+                return "%.3f Hz" % (eq.MIN_FREQ * (eq.MAX_FREQ / eq.MIN_FREQ) ** v)
+            if off == eq.GAIN:
+                return "%+.2f dB" % (eq.MIN_GAIN + v * (eq.MAX_GAIN - eq.MIN_GAIN))
+            if off == eq.Q:
+                return "%.3f" % (eq.MIN_Q * (eq.MAX_Q / eq.MIN_Q) ** v)
+            if off == eq.SHAPE:
+                return eq.SHAPES[int(round(v * 9))].title()
+            return "%d%%" % round(v * 100)
+
+        fx.update(on_set=on_set, text=text)
+        return fx, real
+
+    BASS_EQ = [{"shape": "low cut", "freq": 35, "slope": 24},
+               {"shape": "bell", "freq": 60, "gain": -2, "q": 1.4},
+               {"shape": "bell", "freq": 100, "gain": 1.5, "q": 1.2},
+               {"shape": "bell", "freq": 250, "gain": -2, "q": 1.2},
+               {"shape": "bell", "freq": 800, "gain": 1.5, "q": 1.5}]
+
+    def test_eq_resends_bands_the_plugin_didnt_take(self):
+        from seeker import eq
+        self.rack.fx[(5, 0)], real = self.lying_cfilter(drops=2)
+        out = self.engine.eq("FL Keys", self.BASS_EQ)
+        self.assertEqual(out["warnings"], [])
+        self.assertIn("250.000 Hz", out["bands"][3])
+        self.assertIn("-2.00 dB", out["bands"][3])
+        self.assertIn("800.000 Hz", out["bands"][4])
+        self.assertAlmostEqual(real[4 * 24 + eq.GAIN], eq.norm_gain(1.5))
+
+    def test_eq_warns_when_a_band_never_takes(self):
+        self.rack.fx[(5, 0)], _ = self.lying_cfilter(drops=99)
+        out = self.engine.eq("FL Keys", self.BASS_EQ)
+        self.assertEqual(len(out["warnings"]), 1)
+        self.assertIn("didn't take", out["warnings"][0])
+        self.assertIn("Band 4 Frequency", out["warnings"][0])
+
     def test_eq_explains_what_is_missing(self):
         with self.assertRaisesRegex(SeekerError, "No CFilteR-01 on insert 5"):
             self.engine.eq("FL Keys", [{"freq": 100}])

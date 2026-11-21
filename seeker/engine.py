@@ -598,19 +598,29 @@ class Engine:
         back = self._apply({"cmd": "mixer", "track": insert, "set": rows})
         got = back.get("set", [])
         warnings = list(back.get("warnings") or [])
-        for _ in range(2):      # seen live once: one band read back at its old value
-            wanted = {r[1]: r[2] for r in rows}
-            off = [r for r in rows if not any(g[1] == r[1] and abs(g[3] - wanted[r[1]]) < 1e-3
-                                              for g in got)]
+        # Seen live: a band read back at its old value, and (2026-11-20, a freshly
+        # loaded CFilteR-01) FL's value said a setting took while the plugin's own
+        # text showed it hadn't. So a setting counts as set only when both agree.
+        wanted = {r[1]: r[2] for r in rows}
+        for attempt in range(4):
+            bad_text = eq.misread(bands, got)
+            off = [r for r in rows
+                   if r[1] in bad_text
+                   or not any(g[1] == r[1] and abs(g[3] - wanted[r[1]]) < 1e-3 for g in got)]
             if not off:
                 break
-            self._apply({"cmd": "mixer", "track": insert, "set": off})
-            again = self._apply({"cmd": "mixer", "track": insert, "set": off})
+            if attempt == 3:
+                warnings.append("%d settings didn't take on %s: %s. Run eq again, or set "
+                                "them by hand." % (len(off), eq.PLUGIN, ", ".join(
+                                    g[2] for g in got if g[1] in {r[1] for r in off})))
+                break
+            # send the whole of each band that's off: its parameters depend on each other
+            redo = {r[1] // eq.PARAMS_PER_BAND for r in off}
+            again_rows = [r for r in rows if r[1] // eq.PARAMS_PER_BAND in redo]
+            self._apply({"cmd": "mixer", "track": insert, "set": again_rows})
+            again = self._apply({"cmd": "mixer", "track": insert, "set": again_rows})
             fixed = {g[1]: g for g in again.get("set", [])}
             got = [fixed.get(g[1], g) for g in got]
-        else:
-            warnings.append("%d settings didn't read back as set: %s" % (
-                len(off), ", ".join(g[2] for g in got if g[1] in {r[1] for r in off})))
         shown = eq.describe(got)
         return {"channel": ch["name"], "insert": insert, "insertName": res.get("trackName"),
                 "slot": slot + 1, "bands": [shown.get("Band %d" % n, "") for n in sorted(used)],
