@@ -244,12 +244,16 @@ def route_channels(channels: list[int | str] | None = None, reroute: bool = Fals
 
 
 @mcp.tool()
-def eq(channel: int | str, bands: list[dict], clear: bool = True) -> dict:
+def eq(bands: list[dict], channel: int | str | None = None, clear: bool = True,
+       insert: int | None = None) -> dict:
     """Set the EQ of one channel: CFilteR-01 (the user's Pro-Q 4 clone) on the
     channel's mixer insert, in real units.
 
     channel: rack index or channel name. It must have its own insert
       (route_channels) with CFilteR-01 in one of the insert's slots.
+      "master" EQs the master.
+    insert: EQ a mixer insert directly instead of a channel's: 0 = the master,
+      or a bus. Give channel or insert.
     bands: [{"shape": "low cut", "freq": 40, "slope": 12},
             {"shape": "bell", "freq": 65, "gain": -2, "q": 1.2}, ...]
       shape: bell, low shelf, low cut (= high pass), high shelf, high cut
@@ -262,7 +266,7 @@ def eq(channel: int | str, bands: list[dict], clear: bool = True) -> dict:
     Returns each band as CFilteR-01 now shows it ("Low Cut 40.000 Hz ..."), read
     back from the plugin."""
     try:
-        return dict(ok=True, **engine.eq(channel, bands, clear))
+        return dict(ok=True, **engine.eq(channel, bands, clear, insert))
     except SeekerError as e:
         return _fail(e)
 

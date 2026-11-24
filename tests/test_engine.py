@@ -542,6 +542,27 @@ class EqTest(SoundsFixture):
         self.assertIn("didn't take", out["warnings"][0])
         self.assertIn("Band 4 Frequency", out["warnings"][0])
 
+    def test_eq_on_the_master(self):
+        self.rack.fx[(0, 0)] = fake_cfilter()
+        out = self.engine.eq(None, [{"shape": "low cut", "freq": 20, "slope": 24}], insert=0)
+        self.assertEqual((out["channel"], out["insert"]), ("Master", 0))
+        self.assertAlmostEqual(self.value(0, 1, "Shape"), 2 / 9.0)
+        out = self.engine.eq("master", [{"shape": "bell", "freq": 300, "gain": -1}])
+        self.assertEqual(out["insert"], 0)
+        self.assertAlmostEqual(self.value(0, 1, "Gain"), 29 / 60.0)
+        with self.assertRaisesRegex(SeekerError, "insert"):
+            self.engine.eq(None, [{"freq": 100}], insert=-1)
+
+    def test_a_channel_named_like_a_number(self):
+        # MCP clients hand "808" over as the number 808: it is still the channel's name
+        bass = self.rack.names.index("808")                 # index 4, insert 4
+        self.rack.fx[(4, 0)] = fake_cfilter()
+        out = self.engine.eq(808, [{"shape": "low cut", "freq": 25, "slope": 24}])
+        self.assertEqual((out["channel"], out["insert"]), ("808", 4))
+        self.assertEqual(self.engine.set_channel(808, volume=0.5)["channel"], bass)
+        with self.assertRaisesRegex(SeekerError, "No channel 909"):
+            self.engine.set_channel(909, volume=0.5)
+
     def test_eq_explains_what_is_missing(self):
         with self.assertRaisesRegex(SeekerError, "No CFilteR-01 on insert 5"):
             self.engine.eq("FL Keys", [{"freq": 100}])
