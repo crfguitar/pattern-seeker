@@ -207,6 +207,17 @@ or `add_channel` makes the channels, `write` writes and lays it out, and
 `rewrite` puts new notes into the same patterns without touching the
 playlist.
 
+Songs in other styles follow the same pattern (plan, then `write`):
+`midwest_emo.py` (indie rock / midwest emo, F major, 148 BPM) and
+`indietronica.py` (D major, 116 BPM) on FL's own instruments, and six
+instrumentals with room for a rapper, each built on one drum kit or sample
+pack: `crate_weather.py` (underground boom bap), `first_light.py` (a soul
+flip), `inner_light.py` and `trap_gods.py` (trap), `lucid_arcade.py`
+(bright, bouncy half-time) and `requiem_block.py` (chamber-orchestra hip
+hop). Those six look for their packs under `~/Music/Samples`, or wherever
+the `PATTERN_SEEKER_SAMPLES` environment variable points. Swap the file
+names in their sound tables for your own kits.
+
 Dynamics are velocity, and FLEX turns velocity straight into loudness, so the
 Divertimento keeps pp to ff within velocity 54-88. Changes are smoothed into
 two-bar crescendos and diminuendos, and ff is kept for each movement's climax

@@ -332,9 +332,16 @@ class Engine:
         beats counted from 0 at the pattern start and any fraction allowed - into the
         piano roll of `channel` (its rack index from status, or its name). Replaces
         what an earlier write_part put there; anything else in that roll is kept."""
+        return self._write_roll(channel, self._steps(notes))
+
+    def clear_part(self, channel):
+        """Take out of the selected pattern every note write_part (or a beat) put in
+        `channel`'s piano roll; notes drawn by hand stay. back puts them back."""
+        return self._write_roll(channel, [])
+
+    def _write_roll(self, channel, steps):
         hb = self._need_fl()
         target = self._find_channel(hb["channels"], channel)
-        steps = self._steps(notes)
         if not pianoroll.write_script(steps):
             raise SeekerError("Couldn't write the piano-roll script (FL's Settings "
                               "folder is missing).")
@@ -353,7 +360,7 @@ class Engine:
         del self.history[:-50]
         problems = self._run_rolls([(role, target, steps)])
         self.last_rolls[pattern] = dict(self.last_rolls.get(pattern, {}), **{role: steps})
-        end = max(s + l for _, s, l, _ in steps) / 4.0
+        end = max((s + l for _, s, l, _ in steps), default=0) / 4.0
         return {"channel": target["name"], "pattern": pattern, "notes": len(steps),
                 "beats": round(end, 3), "problems": problems,
                 "canGoBack": bool(self.history)}
@@ -393,6 +400,11 @@ class Engine:
         if isinstance(channel, int) and not isinstance(channel, bool):
             for ch in rack:
                 if ch["index"] == channel:
+                    return ch
+            # MCP clients turn the name "808" into the number 808 before it gets here
+            # (the tool takes int | str), so a number that isn't an index may be a name.
+            for ch in rack:
+                if ch["name"].strip() == str(channel):
                     return ch
         elif isinstance(channel, str):
             want = channel.strip().lower()
@@ -551,10 +563,24 @@ class Engine:
 
     # ---- EQ on the mixer inserts (CFilteR-01) ---------------------------------
     @_locked
-    def eq(self, channel, bands, clear=True):
+    def eq(self, channel, bands, clear=True, insert=None):
         """Set CFilteR-01 on `channel`'s mixer insert: bands in real units
-        ([{shape, freq, gain, q, slope, band?, on?}]). clear: every other band off."""
+        ([{shape, freq, gain, q, slope, band?, on?}]). clear: every other band off.
+
+        insert: EQ that mixer insert instead of a channel's (0 = the master).
+        channel "master" means the master too, unless a rack channel has that name."""
         hb = self._need_fl()
+        if insert is None and isinstance(channel, str) and channel.strip().lower() == "master" \
+                and not any(c["name"].strip().lower() == "master" for c in hb["channels"]):
+            insert = 0
+        if insert is not None:
+            if isinstance(insert, bool) or not isinstance(insert, int) or insert < 0:
+                raise SeekerError("insert is a mixer insert number: 0 = the master, 1-125.")
+            out = self._eq_insert(insert, None, bands, clear)
+            out["channel"] = "Master" if insert == 0 else out.get("insertName")
+            return out
+        if channel is None:
+            raise SeekerError("eq needs a channel (rack index or name) or an insert.")
         return self._eq_channel(self._find_channel(hb["channels"], channel), bands, clear)
 
     @_locked
@@ -579,13 +605,17 @@ class Engine:
         return out
 
     def _eq_channel(self, ch, bands, clear):
-        if not isinstance(bands, (list, tuple)):
-            raise SeekerError("bands must be a list like [{\"shape\": \"low cut\", "
-                              "\"freq\": 40}].")
         insert = ch.get("insert")
         if not insert:
             raise SeekerError("%s plays straight into the master; route_channels gives it "
                               "an insert first." % ch["name"])
+        return self._eq_insert(insert, ch["name"], bands, clear)
+
+    def _eq_insert(self, insert, label, bands, clear):
+        """CFilteR-01 on mixer insert `insert` (0 = master); label names the channel."""
+        if not isinstance(bands, (list, tuple)):
+            raise SeekerError("bands must be a list like [{\"shape\": \"low cut\", "
+                              "\"freq\": 40}].")
         res = self._apply({"cmd": "mixer", "track": insert, "slots": True})
         slot = next((s for s, name, _ in res.get("slots", [])
                      if eq.PLUGIN.lower() in name.lower()), None)
@@ -627,7 +657,7 @@ class Engine:
             fixed = {g[1]: g for g in again.get("set", [])}
             got = [fixed.get(g[1], g) for g in got]
         shown = eq.describe(got)
-        return {"channel": ch["name"], "insert": insert, "insertName": res.get("trackName"),
+        return {"channel": label, "insert": insert, "insertName": res.get("trackName"),
                 "slot": slot + 1, "bands": [shown.get("Band %d" % n, "") for n in sorted(used)],
                 "warnings": warnings}
 

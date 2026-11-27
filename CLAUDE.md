@@ -138,7 +138,9 @@ EQ runs on CFilteR-01, the user's own Pro-Q 4 clone, which their template has
 in slot 1 of mixer inserts 1-10. "EQ the mix", "make the parts fit" →
 `mix_eq` with the genre: starting points from `kits.GENRE_EQ` (else
 `DEFAULT_EQ`). "Cut the Rhodes below 150", "less boom on the bass" → `eq` for
-that channel, in Hz, dB and Q. Both read the bands back from the plugin:
+that channel, in Hz, dB and Q. The master: `eq` with `channel="master"` (or
+`insert=0`; `insert` reaches any insert, e.g. a bus); keep it gentle (a
+subsonic cut, a broad dip under 1 dB). Both read the bands back from the plugin:
 report what it shows. The starting points were not chosen by ear, so ask the
 user to listen. Pattern Seeker can't load a plugin into an insert (opening an
 effect from outside FL always lands on the master), so when CFilteR-01 is
