@@ -168,6 +168,15 @@ class EngineTest(EngineFixture):
         self.engine.back()
         self.assertEqual(self.roll.written[-1], [])         # roll emptied again
 
+    def test_clear_part_empties_the_roll_and_back_restores_it(self):
+        self.rack.names.append("Guitar")
+        self.engine.write_part("Guitar", [[61, 0, 0.5, 110]])
+        out = self.engine.clear_part("Guitar")
+        self.assertEqual((out["notes"], out["beats"], out["problems"]), (0, 0, []))
+        self.assertEqual(self.roll.written[-1], [])
+        self.engine.back()
+        self.assertEqual(self.roll.written[-1], [(61, 0, 2, 110)])
+
     def test_write_part_explains_bad_input(self):
         for channel, notes in ((12, [[60, 0, 1]]), ("Tuba", [[60, 0, 1]]), (0, []),
                                (0, [[200, 0, 1]]), (0, [[60, -1, 1]]), (0, [["x"]])):

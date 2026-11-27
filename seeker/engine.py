@@ -332,9 +332,16 @@ class Engine:
         beats counted from 0 at the pattern start and any fraction allowed - into the
         piano roll of `channel` (its rack index from status, or its name). Replaces
         what an earlier write_part put there; anything else in that roll is kept."""
+        return self._write_roll(channel, self._steps(notes))
+
+    def clear_part(self, channel):
+        """Take out of the selected pattern every note write_part (or a beat) put in
+        `channel`'s piano roll; notes drawn by hand stay. back puts them back."""
+        return self._write_roll(channel, [])
+
+    def _write_roll(self, channel, steps):
         hb = self._need_fl()
         target = self._find_channel(hb["channels"], channel)
-        steps = self._steps(notes)
         if not pianoroll.write_script(steps):
             raise SeekerError("Couldn't write the piano-roll script (FL's Settings "
                               "folder is missing).")
@@ -353,7 +360,7 @@ class Engine:
         del self.history[:-50]
         problems = self._run_rolls([(role, target, steps)])
         self.last_rolls[pattern] = dict(self.last_rolls.get(pattern, {}), **{role: steps})
-        end = max(s + l for _, s, l, _ in steps) / 4.0
+        end = max((s + l for _, s, l, _ in steps), default=0) / 4.0
         return {"channel": target["name"], "pattern": pattern, "notes": len(steps),
                 "beats": round(end, 3), "problems": problems,
                 "canGoBack": bool(self.history)}
